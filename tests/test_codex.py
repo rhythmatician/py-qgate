@@ -72,7 +72,7 @@ def test_codex_change_event_accepts_path_aliases(tmp_path: Path) -> None:
     assert targets == sorted(path.resolve() for path in targets_by_name.values())
 
 
-def test_codex_change_event_does_not_select_target_in_configured_exclusion(
+def test_codex_change_event_does_not_select_target_in_configured_excluded_folder(
     tmp_path: Path,
 ) -> None:
     excluded = tmp_path / "generated"

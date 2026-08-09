@@ -105,7 +105,9 @@ def test_target_selection_rejects_paths_outside_workspace(tmp_path: Path) -> Non
     assert targets == []
 
 
-def test_explicit_target_inside_configured_exclusion_is_not_selected(tmp_path: Path) -> None:
+def test_explicit_target_inside_configured_excluded_folder_is_not_selected(
+    tmp_path: Path,
+) -> None:
     excluded = tmp_path / "migrations"
     excluded.mkdir()
     candidate = excluded / "legacy.py"
