@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -16,6 +17,7 @@ from qgate.engine import (
     _payload_paths,
     _resolve_python_files,
     _working_directory,
+    run_gates,
 )
 
 
@@ -129,3 +131,47 @@ def test_custom_guard_errors_detects_getattr(tmp_path: Path) -> None:
     errors = _custom_guard_errors([f], tmp_path)
     assert len(errors) == 1
     assert "ban-getattr-literals" in errors[0]
+
+
+def test_run_gates_success_is_silent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    source = tmp_path / "clean.py"
+    source.write_text("x = 1\n")
+    commands: list[list[str]] = []
+
+    def run_command(command: list[str], root: Path) -> subprocess.CompletedProcess[str]:
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0, "success output", "")
+
+    monkeypatch.setattr("qgate.engine._run_command", run_command)
+    assert run_gates(files=[source], root=tmp_path) == 0
+    ruff_commands = [command for command in commands if "ruff" in command[0]]
+    assert ruff_commands
+    assert all("--quiet" in command for command in ruff_commands)
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == ""
+
+
+def test_run_gates_failure_prints_concise_diagnostics(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    source = tmp_path / "bad.py"
+    source.write_text("x = 1\n")
+
+    def run_command(command: list[str], root: Path) -> subprocess.CompletedProcess[str]:
+        if "--output-format=concise" in command:
+            return subprocess.CompletedProcess(command, 1, "", "bad.py:1:1: F401 unused import")
+        return subprocess.CompletedProcess(command, 0, "success output", "")
+
+    monkeypatch.setattr("qgate.engine._run_command", run_command)
+    assert run_gates(files=[source], root=tmp_path) == 2
+    captured = capsys.readouterr()
+    assert "RUFF LINT" in captured.err
+    assert "bad.py:1:1: F401 unused import" in captured.err
+    assert "success output" not in captured.err
