@@ -112,11 +112,15 @@ def _settings_with_format_on_save(text: str) -> str:
             key_start = index
             break
         char = text[index]
-        if char == '"' and not escaped:
-            in_string = not in_string
-        escaped = in_string and char == "\\" and not escaped
-        if char != "\\":
-            escaped = False
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+        elif char == '"':
+            in_string = True
         index += 1
     if key_start != -1:
         colon = text.find(":", key_start + len(key))
@@ -156,7 +160,7 @@ def _settings_with_format_on_save(text: str) -> str:
     if closing_brace == -1:
         raise ValueError("VS Code settings must be an object")
     prefix = text[:closing_brace].rstrip()
-    separator = ",\n" if prefix.rstrip().endswith(("{", ",")) is False else "\n"
+    separator = "\n" if prefix.rstrip().endswith(("{", ",")) else ",\n"
     return prefix + separator + f'    "{_VSCODE_SETTINGS}": true\n' + text[closing_brace:]
 
 
@@ -219,16 +223,15 @@ def _run_init(target_dir: Path) -> int:
     vscode_settings = target_dir / ".vscode" / "settings.json"
     vscode_settings.parent.mkdir(parents=True, exist_ok=True)
     if vscode_settings.exists():
+        existing = vscode_settings.read_text(encoding="utf-8")
         try:
-            updated = _settings_with_format_on_save(
-                vscode_settings.read_text(encoding="utf-8")
-            )
+            updated = _settings_with_format_on_save(existing)
         except ValueError:
             print(
                 "  skip  .vscode/settings.json (invalid JSON or JSONC; please fix it and re-run)"
             )
         else:
-            if updated != vscode_settings.read_text(encoding="utf-8"):
+            if updated != existing:
                 vscode_settings.write_text(updated, encoding="utf-8")
                 print("  write .vscode/settings.json (enabled format-on-save)")
             else:
