@@ -1,0 +1,9 @@
+{
+  "hooks": [
+    {
+      "name": "quality-gate",
+      "event": "PostToolUse",
+      "command": "uvx --from git+https://github.com/rhythmatician/py-qgate qgate --codex-stdin --fix"
+    }
+  ]
+}
