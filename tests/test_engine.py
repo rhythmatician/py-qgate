@@ -103,6 +103,26 @@ def test_explicit_fix_keeps_selected_gate_targets_in_each_command(
     assert all(command[-2:] == [str(path) for path in sources] for command in commands)
 
 
+def test_dmypy_respects_project_owned_mypy_configuration(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "clean.py"
+    source.write_text("x = 1\n")
+    commands: list[list[str]] = []
+
+    def run_command(command: list[str], root: Path) -> subprocess.CompletedProcess[str]:
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr("qgate.engine._run_command", run_command)
+
+    assert run_gates(files=[source], root=tmp_path, type_checker="dmypy") == 0
+    dmypy_commands = [command for command in commands if "dmypy" in command[0]]
+    assert dmypy_commands == [[dmypy_commands[0][0], "run", "--", str(source)]]
+    assert "--strict" not in dmypy_commands[0]
+
+
 def test_run_gates_failure_prints_concise_diagnostics(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

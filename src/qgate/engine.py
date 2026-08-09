@@ -231,7 +231,7 @@ def run_gates(
     add_commands(
         type_checker.upper(),
         tc,
-        ["run", "--", "--strict"] if type_checker == "dmypy" else [],
+        ["run", "--"] if type_checker == "dmypy" else [],
     )
 
     command_results = [(label, _run_command(command, root)) for label, command in commands]

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from collections.abc import Sequence
 from importlib.metadata import version
@@ -239,17 +240,33 @@ def _run_init(target_dir: Path) -> int:
         vscode_settings.write_text('{\n    "editor.formatOnSave": true\n}\n', encoding="utf-8")
         print("  write .vscode/settings.json")
 
-    # Append ruff/pyright settings to pyproject.toml if missing
+    # Append Ruff and Pyright policy independently so existing project choices win.
     pyproject = target_dir / "pyproject.toml"
-    snippet = (_TEMPLATES_DIR / "pyproject-snippet.toml").read_text(encoding="utf-8")
     if pyproject.exists():
         existing = pyproject.read_text(encoding="utf-8")
-        if "[tool.ruff]" in existing:
+        additions: list[str] = []
+        if re.search(r"(?m)^\s*\[tool\.ruff(?:\.[^]]+)?]\s*(?:#.*)?$", existing):
             print("  skip  pyproject.toml [tool.ruff] (already present)")
         else:
-            with pyproject.open("a", encoding="utf-8") as fh:
-                fh.write(snippet)
+            additions.append(
+                (_TEMPLATES_DIR / "pyproject-ruff.toml").read_text(encoding="utf-8")
+            )
             print("  write pyproject.toml (appended [tool.ruff] settings)")
+
+        if re.search(r"(?m)^\s*\[tool\.pyright]\s*(?:#.*)?$", existing):
+            print("  skip  pyproject.toml [tool.pyright] (already present)")
+        else:
+            additions.append(
+                (_TEMPLATES_DIR / "pyproject-pyright.toml").read_text(encoding="utf-8")
+            )
+            print("  write pyproject.toml (appended [tool.pyright] settings)")
+
+        if additions:
+            separator = ""
+            if not existing.endswith("\n\n"):
+                separator = "\n" if existing.endswith("\n") else "\n\n"
+            with pyproject.open("a", encoding="utf-8") as fh:
+                fh.write(separator + "\n".join(additions))
     else:
         print("  skip  pyproject.toml (not found — create one and re-run `qgate init`)")
 
