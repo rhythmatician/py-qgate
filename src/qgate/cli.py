@@ -63,7 +63,7 @@ def _remove_trailing_commas(text: str) -> str:
     result: list[str] = []
     in_string = False
     escaped = False
-    for index, char in enumerate(text):
+    for char in text:
         if in_string:
             result.append(char)
             if escaped:
@@ -89,13 +89,35 @@ def _remove_trailing_commas(text: str) -> str:
 def _settings_with_format_on_save(text: str) -> str:
     try:
         settings = json.loads(_without_jsonc_comments(text))
-    except (ValueError, json.JSONDecodeError):
+    except ValueError:
         raise ValueError("invalid VS Code settings") from None
     if not isinstance(settings, dict):
         raise ValueError("VS Code settings must be an object")
 
     key = json.dumps(_VSCODE_SETTINGS)
-    key_start = text.find(key)
+    key_start = -1
+    in_string = False
+    escaped = False
+    index = 0
+    while index < len(text):
+        if not in_string and text.startswith("//", index):
+            newline = text.find("\n", index)
+            index = len(text) if newline == -1 else newline
+            continue
+        if not in_string and text.startswith("/*", index):
+            end = text.find("*/", index + 2)
+            index = len(text) if end == -1 else end + 2
+            continue
+        if not in_string and text.startswith(key, index):
+            key_start = index
+            break
+        char = text[index]
+        if char == '"' and not escaped:
+            in_string = not in_string
+        escaped = in_string and char == "\\" and not escaped
+        if char != "\\":
+            escaped = False
+        index += 1
     if key_start != -1:
         colon = text.find(":", key_start + len(key))
         if colon != -1:
@@ -126,6 +148,8 @@ def _settings_with_format_on_save(text: str) -> str:
                 elif char == "," and depth == 0:
                     break
                 value_end += 1
+            while value_end > value_start and text[value_end - 1].isspace():
+                value_end -= 1
             return text[:value_start] + "true" + text[value_end:]
 
     closing_brace = text.rfind("}")
