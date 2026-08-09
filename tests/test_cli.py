@@ -63,3 +63,16 @@ def test_main_init_subcommand(tmp_path: Path) -> None:
     result = main(["init"], workspace_root=tmp_path)
     assert result == 0
     assert (tmp_path / ".codex" / "hooks.json").exists()
+
+
+def test_run_init_does_not_create_agents_file(tmp_path: Path) -> None:
+    _run_init(tmp_path)
+    assert not (tmp_path / "AGENTS.md").exists()
+
+
+def test_run_init_does_not_modify_agents_file(tmp_path: Path) -> None:
+    agents = tmp_path / "AGENTS.md"
+    original = "# Existing guidance\n"
+    agents.write_text(original)
+    _run_init(tmp_path)
+    assert agents.read_text() == original
