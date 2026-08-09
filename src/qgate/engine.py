@@ -245,6 +245,7 @@ def _enrich_type_diagnostics(
     max_chars: int = _TYPE_CONTEXT_LIMIT,
 ) -> str:
     """Add bounded local Python context to narrowly supported Pyright errors."""
+    root = root.resolve()
     additions: list[str] = []
     used = 0
     for match in _TYPE_DIAGNOSTIC_PATTERN.finditer(output):
@@ -331,6 +332,7 @@ def run_gates(
     if not failures and not guard_errors:
         return 0
 
+    type_checker_label = type_checker.casefold()
     print(
         "[QUALITY GATE FAILED FOR: "
         + ", ".join(str(path.relative_to(root)) for path in files)
@@ -340,7 +342,7 @@ def run_gates(
     for label, result in failures:
         print(f"\n--- {label} ---", file=sys.stderr)
         output = "\n".join(part for part in (result.stdout or "", result.stderr or "") if part)
-        if label.upper() == type_checker.upper():
+        if label.casefold() == type_checker_label:
             output = _enrich_type_diagnostics(output, root=root)
         print(output or f"command exited with status {result.returncode}", file=sys.stderr)
     if guard_errors:
