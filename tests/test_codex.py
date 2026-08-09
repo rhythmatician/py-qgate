@@ -70,3 +70,25 @@ def test_codex_change_event_accepts_path_aliases(tmp_path: Path) -> None:
     targets = select_codex_gate_targets(io.StringIO(json.dumps(payload)), tmp_path)
 
     assert targets == sorted(path.resolve() for path in targets_by_name.values())
+
+
+def test_codex_change_event_does_not_select_target_in_configured_excluded_folder(
+    tmp_path: Path,
+) -> None:
+    excluded = tmp_path / "generated"
+    excluded.mkdir()
+    target = excluded / "changed.py"
+    target.write_text("", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text(
+        '[tool.qgate]\nexcluded-folders = ["generated"]\n',
+        encoding="utf-8",
+    )
+    payload = {
+        "cwd": str(tmp_path),
+        "tool_name": "write_file",
+        "tool_input": {"path": str(target)},
+    }
+
+    targets = select_codex_gate_targets(io.StringIO(json.dumps(payload)), tmp_path)
+
+    assert targets == []
