@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import subprocess
+from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
@@ -50,6 +51,56 @@ def test_run_gates_success_is_silent(
     captured = capsys.readouterr()
     assert captured.out == ""
     assert captured.err == ""
+
+
+def test_full_workspace_fix_batches_command_targets_below_windows_limit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sources = [
+        tmp_path / f"package_{index:04d}" / ("long_module_name_" + "x" * 48 + ".py")
+        for index in range(700)
+    ]
+    commands: list[list[str]] = []
+
+    def run_command(command: list[str], root: Path) -> subprocess.CompletedProcess[str]:
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    def no_guard_errors(_files: Sequence[Path], _root: Path) -> list[str]:
+        return []
+
+    monkeypatch.setattr("qgate.engine._run_command", run_command)
+    monkeypatch.setattr("qgate.engine._custom_guard_errors", no_guard_errors)
+
+    assert run_gates(files=sources, root=tmp_path, fix=True, full_workspace=True) == 0
+    assert commands
+    assert all(len(subprocess.list2cmdline(command)) <= 16_000 for command in commands)
+    assert {
+        Path(argument) for command in commands for argument in command if argument.endswith(".py")
+    } == set(sources)
+
+
+def test_explicit_fix_keeps_selected_gate_targets_in_each_command(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sources = [tmp_path / "first.py", tmp_path / "second.py"]
+    commands: list[list[str]] = []
+
+    def run_command(command: list[str], root: Path) -> subprocess.CompletedProcess[str]:
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    def no_guard_errors(_files: Sequence[Path], _root: Path) -> list[str]:
+        return []
+
+    monkeypatch.setattr("qgate.engine._run_command", run_command)
+    monkeypatch.setattr("qgate.engine._custom_guard_errors", no_guard_errors)
+
+    assert run_gates(files=sources, root=tmp_path, fix=True) == 0
+    assert commands
+    assert all(command[-2:] == [str(path) for path in sources] for command in commands)
 
 
 def test_run_gates_failure_prints_concise_diagnostics(

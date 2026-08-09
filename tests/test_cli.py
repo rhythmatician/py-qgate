@@ -13,6 +13,13 @@ def test_main_no_files_returns_zero(tmp_path: Path) -> None:
     assert result == 0
 
 
+def test_main_version_reports_installed_qgate_version(capsys) -> None:
+    result = main(["--version"])
+
+    assert result == 0
+    assert capsys.readouterr().out == "qgate 0.1.0\n"
+
+
 def test_main_ci_and_fix_errors() -> None:
     import io
     import sys
