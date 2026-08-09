@@ -208,8 +208,6 @@ def _short_type_context(
     source_path: Path,
     receiver: str,
     member: str,
-    *,
-    root: Path,
 ) -> str | None:
     try:
         tree = ast.parse(source_path.read_text(encoding="utf-8"))
@@ -224,15 +222,15 @@ def _short_type_context(
             if isinstance(child, ast.AnnAssign) and isinstance(child.target, ast.Name):
                 if child.target.id == member:
                     contract = f"{member}: {ast.unparse(child.annotation)}"
-                    return _format_type_context(source_path, receiver, contract, root=root)
+                    return _format_type_context(receiver, contract)
             if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)) and child.name == member:
                 returns = ast.unparse(child.returns) if child.returns else "Unknown"
                 contract = f"{member}(...) -> {returns}"
-                return _format_type_context(source_path, receiver, contract, root=root)
+                return _format_type_context(receiver, contract)
     return None
 
 
-def _format_type_context(path: Path, receiver: str, contract: str, *, root: Path) -> str:
+def _format_type_context(receiver: str, contract: str) -> str:
     hint = ""
     if "None" in receiver:
         hint = "; hint: narrow None before access"
@@ -261,7 +259,6 @@ def _enrich_type_diagnostics(
             source_path,
             match.group("receiver"),
             match.group("member"),
-            root=root,
         )
         if not context or used + len(context) + 1 > max_chars:
             continue
@@ -343,7 +340,7 @@ def run_gates(
     for label, result in failures:
         print(f"\n--- {label} ---", file=sys.stderr)
         output = "\n".join(part for part in (result.stdout or "", result.stderr or "") if part)
-        if label == type_checker.upper():
+        if label.upper() == type_checker.upper():
             output = _enrich_type_diagnostics(output, root=root)
         print(output or f"command exited with status {result.returncode}", file=sys.stderr)
     if guard_errors:

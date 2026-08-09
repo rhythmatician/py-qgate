@@ -12,6 +12,7 @@ from qgate.engine import (
     _custom_guard_errors,
     _discover_python_files,
     _enrich_type_diagnostics,
+    _TYPE_CONTEXT_LIMIT,
     _json_value,
     _load_codex_payload,
     _payload_paths,
@@ -162,7 +163,7 @@ def test_enrich_type_diagnostic_is_bounded(tmp_path: Path) -> None:
 
     enriched = _enrich_type_diagnostics(diagnostic, root=tmp_path)
 
-    assert len(enriched) <= len(diagnostic) + 1201
+    assert len(enriched) <= len(diagnostic) + _TYPE_CONTEXT_LIMIT + 1
 
 
 def test_enrich_type_diagnostic_fails_open(tmp_path: Path) -> None:
