@@ -59,13 +59,60 @@ def test_run_init_appends_pyproject(tmp_path: Path) -> None:
     _run_init(tmp_path)
     content = pyproject.read_text()
     assert "[tool.ruff]" in content
+    assert 'select = ["E4", "E7", "E9", "F"]' in content
+    assert 'typeCheckingMode = "standard"' in content
 
 
-def test_run_init_skips_existing_ruff(tmp_path: Path) -> None:
+def test_run_init_preserves_existing_ruff_and_adds_missing_pyright(
+    tmp_path: Path,
+) -> None:
     pyproject = tmp_path / "pyproject.toml"
     original = "[project]\nname = 'test'\n\n[tool.ruff]\nline-length = 88\n"
     pyproject.write_text(original)
+
     _run_init(tmp_path)
+
+    content = pyproject.read_text()
+    assert original in content
+    assert content.count("[tool.ruff]") == 1
+    assert "[tool.ruff.lint]" not in content
+    assert content.count("[tool.pyright]") == 1
+    assert 'typeCheckingMode = "standard"' in content
+
+
+def test_run_init_preserves_existing_pyright_and_adds_missing_ruff(
+    tmp_path: Path,
+) -> None:
+    pyproject = tmp_path / "pyproject.toml"
+    original = (
+        "[project]\nname = 'test'\n\n"
+        "[tool.pyright]\npythonVersion = '3.11'\ntypeCheckingMode = 'basic'\n"
+    )
+    pyproject.write_text(original)
+
+    _run_init(tmp_path)
+
+    content = pyproject.read_text()
+    assert original in content
+    assert content.count("[tool.pyright]") == 1
+    assert content.count("[tool.ruff]") == 1
+    assert content.count("[tool.ruff.lint]") == 1
+    assert 'select = ["E4", "E7", "E9", "F"]' in content
+
+
+def test_run_init_leaves_existing_ruff_and_pyright_policy_unchanged(
+    tmp_path: Path,
+) -> None:
+    pyproject = tmp_path / "pyproject.toml"
+    original = (
+        "[project]\nname = 'test'\n\n"
+        "[tool.ruff.lint]\nselect = ['F']\n\n"
+        "[tool.pyright]\ntypeCheckingMode = 'basic'\n"
+    )
+    pyproject.write_text(original)
+
+    _run_init(tmp_path)
+
     assert pyproject.read_text() == original
 
 
