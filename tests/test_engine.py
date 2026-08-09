@@ -163,14 +163,18 @@ def test_run_gates_failure_prints_concise_diagnostics(
 ) -> None:
     source = tmp_path / "bad.py"
     source.write_text("x = 1\n")
+    commands: list[list[str]] = []
 
     def run_command(command: list[str], root: Path) -> subprocess.CompletedProcess[str]:
+        commands.append(command)
         if "--output-format=concise" in command:
             return subprocess.CompletedProcess(command, 1, "", "bad.py:1:1: F401 unused import")
         return subprocess.CompletedProcess(command, 0, "success output", "")
 
     monkeypatch.setattr("qgate.engine._run_command", run_command)
     assert run_gates(files=[source], root=tmp_path) == 2
+    lint_commands = [command for command in commands if "--output-format=concise" in command]
+    assert lint_commands and "--quiet" in lint_commands[0]
     captured = capsys.readouterr()
     assert "RUFF LINT" in captured.err
     assert "bad.py:1:1: F401 unused import" in captured.err
