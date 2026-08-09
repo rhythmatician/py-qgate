@@ -1,0 +1,7 @@
+interface:
+  display_name: "Adopt qgate"
+  short_description: "Migrate a Python project to qgate"
+  default_prompt: "Use $adopt-qgate to replace this project's existing quality-check flows with qgate."
+
+policy:
+  allow_implicit_invocation: false
