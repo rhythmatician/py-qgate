@@ -6,6 +6,7 @@ import argparse
 import json
 import sys
 from collections.abc import Sequence
+from importlib.metadata import version
 from pathlib import Path
 from typing import TextIO
 
@@ -169,6 +170,11 @@ def _build_parser() -> argparse.ArgumentParser:
         help="subcommand to run (e.g. 'init' to scaffold config files)",
     )
     parser.add_argument(
+        "--version",
+        action="store_true",
+        help="show the installed qgate version and exit",
+    )
+    parser.add_argument(
         "--codex-stdin",
         action="store_true",
         help="read the Codex PostToolUse JSON payload from stdin",
@@ -260,6 +266,10 @@ def main(
     parser = _build_parser()
     args = parser.parse_args(argv)
 
+    if args.version:
+        print(f"qgate {version('py-qgate')}")
+        return 0
+
     if args.command == "init":
         return _run_init(workspace_root or Path.cwd())
 
@@ -292,6 +302,7 @@ def main(
         root=root,
         ci=args.ci,
         fix=args.fix,
+        full_workspace=not all_paths and not args.codex_stdin,
         type_checker=args.type_checker,
     )
 

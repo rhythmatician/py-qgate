@@ -21,6 +21,7 @@ _TYPE_DIAGNOSTIC_PATTERN = re.compile(
 )
 _TYPE_CONTEXT_LIMIT = 1200
 _TYPE_CONTEXT_ITEM_LIMIT = 300
+_WINDOWS_SAFE_COMMAND_LENGTH = 16_000
 
 
 def _run_command(command: list[str], root: Path) -> subprocess.CompletedProcess[str]:
@@ -54,6 +55,34 @@ def _tool_path(name: str, root: Path) -> str:
 
 def _tool_command(tool: str, arguments: Sequence[str], files: Sequence[Path]) -> list[str]:
     return [tool, *arguments, *(str(path) for path in files)]
+
+
+def _tool_commands(
+    tool: str,
+    arguments: Sequence[str],
+    files: Sequence[Path],
+    *,
+    bounded: bool,
+) -> list[list[str]]:
+    """Build exact-target commands, batching full-Workspace runs for Windows safety."""
+    if not bounded:
+        return [_tool_command(tool, arguments, files)]
+
+    prefix = [tool, *arguments]
+    batches: list[list[str]] = []
+    batch = prefix.copy()
+    for path in files:
+        candidate = [*batch, str(path)]
+        if len(subprocess.list2cmdline(candidate)) > _WINDOWS_SAFE_COMMAND_LENGTH and len(
+            batch
+        ) > len(prefix):
+            batches.append(batch)
+            batch = [*prefix, str(path)]
+        else:
+            batch = candidate
+    if len(batch) > len(prefix):
+        batches.append(batch)
+    return batches
 
 
 def _ci_command_targets(files: Sequence[Path], root: Path) -> list[Path]:
@@ -159,6 +188,7 @@ def run_gates(
     root: Path,
     ci: bool = False,
     fix: bool = False,
+    full_workspace: bool = False,
     type_checker: str = "pyright",
 ) -> int:
     """Run quality gates on the given files and return an exit code."""
@@ -169,48 +199,39 @@ def run_gates(
     ruff = _tool_path("ruff", root)
     tc = _tool_path(type_checker, root)
     commands: list[tuple[str, list[str]]] = []
-    if fix:
+
+    def add_commands(label: str, tool: str, arguments: Sequence[str]) -> None:
         commands.extend(
-            (
-                (
-                    "RUFF SAFE FIXES",
-                    _tool_command(ruff, ["check", "--fix", "--quiet"], command_targets),
-                ),
-                (
-                    "RUFF FORMAT",
-                    _tool_command(ruff, ["format", "--quiet"], command_targets),
-                ),
+            (label, command)
+            for command in _tool_commands(
+                tool,
+                arguments,
+                command_targets,
+                bounded=full_workspace and not ci,
             )
         )
+
+    if fix:
+        add_commands("RUFF SAFE FIXES", ruff, ["check", "--fix", "--quiet"])
+        add_commands("RUFF FORMAT", ruff, ["format", "--quiet"])
     format_arguments = ["format"]
     if ci:
         format_arguments.extend(("--exclude", "*.md", "--exclude", "*.ipynb", "--exclude", "*.pyi"))
     if not fix:
-        commands.append(
-            (
-                "RUFF FORMAT CHECK",
-                _tool_command(ruff, [*format_arguments, "--check", "--quiet"], command_targets),
-            )
+        add_commands(
+            "RUFF FORMAT CHECK",
+            ruff,
+            [*format_arguments, "--check", "--quiet"],
         )
-    commands.extend(
-        (
-            (
-                "RUFF LINT",
-                _tool_command(
-                    ruff,
-                    ["check", "--quiet", "--output-format=concise"],
-                    command_targets,
-                ),
-            ),
-            (
-                type_checker.upper(),
-                _tool_command(
-                    tc,
-                    ["run", "--", "--strict"] if type_checker == "dmypy" else [],
-                    command_targets,
-                ),
-            ),
-        )
+    add_commands(
+        "RUFF LINT",
+        ruff,
+        ["check", "--quiet", "--output-format=concise"],
+    )
+    add_commands(
+        type_checker.upper(),
+        tc,
+        ["run", "--", "--strict"] if type_checker == "dmypy" else [],
     )
 
     command_results = [(label, _run_command(command, root)) for label, command in commands]
