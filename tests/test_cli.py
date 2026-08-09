@@ -116,6 +116,40 @@ def test_run_init_leaves_existing_ruff_and_pyright_policy_unchanged(
     assert pyproject.read_text() == original
 
 
+def test_run_init_respects_standalone_ruff_policy(tmp_path: Path) -> None:
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text("[project]\nname = 'test'\n")
+    (tmp_path / "ruff.toml").write_text("[lint]\nselect = ['F']\n")
+
+    _run_init(tmp_path)
+
+    content = pyproject.read_text()
+    assert "[tool.ruff]" not in content
+    assert "[tool.pyright]" in content
+
+
+def test_run_init_respects_dot_ruff_policy(tmp_path: Path) -> None:
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text("[project]\nname = 'test'\n")
+    (tmp_path / ".ruff.toml").write_text("[lint]\nselect = ['F']\n")
+
+    _run_init(tmp_path)
+
+    assert "[tool.ruff]" not in pyproject.read_text()
+
+
+def test_run_init_respects_standalone_pyright_policy(tmp_path: Path) -> None:
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text("[project]\nname = 'test'\n")
+    (tmp_path / "pyrightconfig.json").write_text('{"typeCheckingMode": "basic"}\n')
+
+    _run_init(tmp_path)
+
+    content = pyproject.read_text()
+    assert "[tool.pyright]" not in content
+    assert "[tool.ruff]" in content
+
+
 def test_run_init_preserves_existing_vscode_settings(tmp_path: Path) -> None:
     settings = tmp_path / ".vscode" / "settings.json"
     settings.parent.mkdir()

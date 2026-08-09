@@ -245,15 +245,26 @@ def _run_init(target_dir: Path) -> int:
     if pyproject.exists():
         existing = pyproject.read_text(encoding="utf-8")
         additions: list[str] = []
-        if re.search(r"(?m)^\s*\[tool\.ruff(?:\.[^]]+)?]\s*(?:#.*)?$", existing):
+        ruff_policy = next(
+            (
+                path
+                for path in (target_dir / "ruff.toml", target_dir / ".ruff.toml")
+                if path.is_file()
+            ),
+            None,
+        )
+        if ruff_policy is not None:
+            print(f"  skip  pyproject.toml [tool.ruff] ({ruff_policy.name} already present)")
+        elif re.search(r"(?m)^\s*\[tool\.ruff(?:\.[^]]+)?]\s*(?:#.*)?$", existing):
             print("  skip  pyproject.toml [tool.ruff] (already present)")
         else:
-            additions.append(
-                (_TEMPLATES_DIR / "pyproject-ruff.toml").read_text(encoding="utf-8")
-            )
+            additions.append((_TEMPLATES_DIR / "pyproject-ruff.toml").read_text(encoding="utf-8"))
             print("  write pyproject.toml (appended [tool.ruff] settings)")
 
-        if re.search(r"(?m)^\s*\[tool\.pyright]\s*(?:#.*)?$", existing):
+        pyright_policy = target_dir / "pyrightconfig.json"
+        if pyright_policy.is_file():
+            print("  skip  pyproject.toml [tool.pyright] (pyrightconfig.json already present)")
+        elif re.search(r"(?m)^\s*\[tool\.pyright]\s*(?:#.*)?$", existing):
             print("  skip  pyproject.toml [tool.pyright] (already present)")
         else:
             additions.append(
