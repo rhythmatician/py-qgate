@@ -14,8 +14,8 @@ def test_main_no_files_returns_zero(tmp_path: Path) -> None:
 
 
 def test_main_ci_and_fix_errors() -> None:
-    import sys
     import io
+    import sys
 
     old_stderr = sys.stderr
     sys.stderr = io.StringIO()
@@ -79,10 +79,10 @@ def test_run_init_updates_jsonc_vscode_settings(tmp_path: Path) -> None:
     settings = tmp_path / ".vscode" / "settings.json"
     settings.parent.mkdir()
     settings.write_text(
-        '{\n  // Keep this workspace setting.\n'
+        "{\n  // Keep this workspace setting.\n"
         '  "editor.formatOnSave": false,\n'
         '  "files.trimTrailingWhitespace": true,\n'
-        '}\n'
+        "}\n"
     )
 
     _run_init(tmp_path)

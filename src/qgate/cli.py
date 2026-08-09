@@ -9,14 +9,9 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import TextIO
 
-from qgate.engine import (
-    _discover_python_files,
-    _load_codex_payload,
-    _payload_paths,
-    _resolve_python_files,
-    _working_directory,
-    run_gates,
-)
+from qgate.codex import select_codex_gate_targets
+from qgate.engine import run_gates
+from qgate.targeting import select_all_gate_targets, select_gate_targets
 
 _TEMPLATES_DIR = Path(__file__).parent / "templates"
 _VSCODE_SETTINGS = "editor.formatOnSave"
@@ -227,9 +222,7 @@ def _run_init(target_dir: Path) -> int:
         try:
             updated = _settings_with_format_on_save(existing)
         except ValueError:
-            print(
-                "  skip  .vscode/settings.json (invalid JSON or JSONC; please fix it and re-run)"
-            )
+            print("  skip  .vscode/settings.json (invalid JSON or JSONC; please fix it and re-run)")
         else:
             if updated != existing:
                 vscode_settings.write_text(updated, encoding="utf-8")
@@ -237,9 +230,7 @@ def _run_init(target_dir: Path) -> int:
             else:
                 print("  skip  .vscode/settings.json (format-on-save already enabled)")
     else:
-        vscode_settings.write_text(
-            '{\n    "editor.formatOnSave": true\n}\n', encoding="utf-8"
-        )
+        vscode_settings.write_text('{\n    "editor.formatOnSave": true\n}\n', encoding="utf-8")
         print("  write .vscode/settings.json")
 
     # Append ruff/pyright settings to pyproject.toml if missing
@@ -254,9 +245,7 @@ def _run_init(target_dir: Path) -> int:
                 fh.write(snippet)
             print("  write pyproject.toml (appended [tool.ruff] settings)")
     else:
-        print(
-            "  skip  pyproject.toml (not found — create one and re-run `qgate init`)"
-        )
+        print("  skip  pyproject.toml (not found — create one and re-run `qgate init`)")
 
     print("\nDone. Review the generated files and commit them.")
     return 0
@@ -286,17 +275,17 @@ def main(
     root = (workspace_root or Path.cwd()).resolve()
 
     if args.ci:
-        files = _discover_python_files(root)
+        files = select_all_gate_targets(root)
     elif args.codex_stdin:
-        payload = _load_codex_payload(stdin or sys.stdin)
-        if payload is None:
-            return 0
-        base_dir = _working_directory(payload, root)
-        files = _resolve_python_files(_payload_paths(payload), root, base_dir)
+        files = select_codex_gate_targets(stdin or sys.stdin, root)
     elif not all_paths:
-        files = _discover_python_files(root)
+        files = select_all_gate_targets(root)
     else:
-        files = _resolve_python_files(all_paths, root, root)
+        files = select_gate_targets(
+            all_paths,
+            workspace=root,
+            reported_working_directory=root,
+        )
 
     return run_gates(
         files=files,

@@ -3,144 +3,24 @@
 from __future__ import annotations
 
 import ast
-import json
 import re
 import shutil
 import subprocess
 import sys
-from collections.abc import Iterator, Sequence
+from collections.abc import Sequence
 from pathlib import Path
-from typing import TextIO
 
-type JsonValue = None | bool | int | float | str | list[JsonValue] | dict[str, JsonValue]
-
-
-_EXCLUDED_DIRECTORIES = {
-    ".git",
-    ".mypy_cache",
-    ".pytest_cache",
-    ".ruff_cache",
-    ".venv",
-    ".venv-pip-backup",
-    "artifacts",
-    "tmp",
-}
-_PATCH_FILE_PATTERN = re.compile(
-    r"^\*\*\*\s+(?:(?:Add|Delete|Update)\s+File|Move\s+to):\s*(.+?)\s*$",
-    re.MULTILINE,
-)
 _GETATTR_LITERAL_PATTERN = re.compile(
     r"""getattr\(\s*[a-zA-Z_]\w*\s*,\s*(['"])(.*?)\1\s*,\s*None\s*\)""",
     re.DOTALL,
 )
 _TYPE_DIAGNOSTIC_PATTERN = re.compile(
-    r'^(?P<path>.+?):(?P<line>\d+):(?P<column>\d+) - error: '
+    r"^(?P<path>.+?):(?P<line>\d+):(?P<column>\d+) - error: "
     r'Cannot access attribute "(?P<member>[^"]+)" for class "(?P<receiver>[^"]+)"',
     re.MULTILINE,
 )
 _TYPE_CONTEXT_LIMIT = 1200
 _TYPE_CONTEXT_ITEM_LIMIT = 300
-
-
-def _json_value(value: object) -> JsonValue:
-    """Convert an external JSON value into the runner's typed boundary value."""
-    if value is None or isinstance(value, (bool, int, float, str)):
-        return value
-    if isinstance(value, dict):
-        converted: dict[str, JsonValue] = {}
-        for key, child in value.items():
-            if not isinstance(key, str):
-                raise TypeError("JSON object keys must be strings")
-            converted[key] = _json_value(child)
-        return converted
-    if isinstance(value, list):
-        return [_json_value(child) for child in value]
-    raise TypeError(f"Unsupported JSON value: {type(value).__name__}")
-
-
-def _load_codex_payload(stream: TextIO) -> dict[str, JsonValue] | None:
-    try:
-        raw_payload: object = json.load(stream)
-        payload = _json_value(raw_payload)
-    except (json.JSONDecodeError, TypeError):
-        return None
-    return payload if isinstance(payload, dict) else None
-
-
-def _string_values(value: JsonValue) -> Iterator[str]:
-    if isinstance(value, str):
-        yield value
-    elif isinstance(value, list):
-        for child in value:
-            yield from _string_values(child)
-
-
-def _payload_paths(payload: dict[str, JsonValue]) -> list[str]:
-    tool_input = payload.get("tool_input") or payload.get("toolInput")
-    if not isinstance(tool_input, dict):
-        return []
-
-    paths: list[str] = []
-    for key in ("path", "file_path", "target_file", "paths"):
-        value = tool_input.get(key)
-        if value is not None:
-            paths.extend(_string_values(value))
-
-    tool_name = payload.get("tool_name") or payload.get("toolName")
-    command = tool_input.get("command")
-    if tool_name == "apply_patch" and isinstance(command, str):
-        paths.extend(_PATCH_FILE_PATTERN.findall(command))
-    return paths
-
-
-def _working_directory(payload: dict[str, JsonValue], root: Path) -> Path:
-    raw_cwd = payload.get("cwd")
-    if not isinstance(raw_cwd, str) or not raw_cwd:
-        return root
-
-    candidate = Path(raw_cwd)
-    if not candidate.is_absolute():
-        candidate = root / candidate
-    try:
-        resolved = candidate.resolve()
-        resolved.relative_to(root)
-    except ValueError:
-        return root
-    return resolved if resolved.is_dir() else root
-
-
-def _resolve_python_files(candidates: Sequence[str], root: Path, base_dir: Path) -> list[Path]:
-    files: set[Path] = set()
-    for raw_candidate in candidates:
-        candidate_text = raw_candidate.strip().strip("\"'")
-        if not candidate_text:
-            continue
-
-        candidate = Path(candidate_text)
-        if not candidate.is_absolute():
-            candidate = base_dir / candidate
-        try:
-            resolved = candidate.resolve()
-            resolved.relative_to(root)
-        except ValueError:
-            continue
-
-        if resolved.suffix.lower() == ".py" and resolved.is_file():
-            files.add(resolved)
-    return sorted(files)
-
-
-def _discover_python_files(root: Path) -> list[Path]:
-    files: list[Path] = []
-    for candidate in root.rglob("*"):
-        if not candidate.is_file():
-            continue
-        relative_parts = candidate.relative_to(root).parts
-        if any(part in _EXCLUDED_DIRECTORIES for part in relative_parts):
-            continue
-        if candidate.suffix.lower() == ".py":
-            files.append(candidate.resolve())
-    return sorted(files)
 
 
 def _run_command(command: list[str], root: Path) -> subprocess.CompletedProcess[str]:
@@ -219,10 +99,13 @@ def _short_type_context(
         if not isinstance(node, ast.ClassDef) or node.name != receiver_name:
             continue
         for child in node.body:
-            if isinstance(child, ast.AnnAssign) and isinstance(child.target, ast.Name):
-                if child.target.id == member:
-                    contract = f"{member}: {ast.unparse(child.annotation)}"
-                    return _format_type_context(receiver, contract)
+            if (
+                isinstance(child, ast.AnnAssign)
+                and isinstance(child.target, ast.Name)
+                and child.target.id == member
+            ):
+                contract = f"{member}: {ast.unparse(child.annotation)}"
+                return _format_type_context(receiver, contract)
             if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)) and child.name == member:
                 returns = ast.unparse(child.returns) if child.returns else "Unknown"
                 contract = f"{member}(...) -> {returns}"
