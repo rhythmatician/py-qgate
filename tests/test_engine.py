@@ -12,6 +12,8 @@ import pytest
 from qgate.engine import (
     _custom_guard_errors,
     _discover_python_files,
+    _enrich_type_diagnostics,
+    _TYPE_CONTEXT_LIMIT,
     _json_value,
     _load_codex_payload,
     _payload_paths,
@@ -179,3 +181,42 @@ def test_run_gates_failure_prints_concise_diagnostics(
     assert "RUFF LINT" in captured.err
     assert "bad.py:1:1: F401 unused import" in captured.err
     assert "success output" not in captured.err
+
+
+def test_enrich_type_diagnostic_includes_local_member_contract(tmp_path: Path) -> None:
+    source = tmp_path / "example.py"
+    source.write_text("class User:\n    name: str\n\nuser.name\n")
+    diagnostic = (
+        f"{source}:4:6 - error: Cannot access attribute \"name\" for class \"User\" "
+        "(reportAttributeAccessIssue)"
+    )
+
+    enriched = _enrich_type_diagnostics(diagnostic, root=tmp_path)
+
+    assert enriched.startswith(diagnostic)
+    assert "[TYPE CONTEXT] receiver=User; member=name: str" in enriched
+
+
+def test_enrich_type_diagnostic_skips_broad_errors(tmp_path: Path) -> None:
+    diagnostic = f"{tmp_path / 'example.py'}:1:1 - error: reportGeneralTypeIssues"
+
+    assert _enrich_type_diagnostics(diagnostic, root=tmp_path) == diagnostic
+
+
+def test_enrich_type_diagnostic_is_bounded(tmp_path: Path) -> None:
+    source = tmp_path / "example.py"
+    source.write_text("class User:\n    " + "x" * 400 + ": str\n")
+    diagnostic = (
+        f"{source}:2:1 - error: Cannot access attribute \"{'x' * 400}\" "
+        'for class "User"'
+    )
+
+    enriched = _enrich_type_diagnostics(diagnostic, root=tmp_path)
+
+    assert len(enriched) <= len(diagnostic) + _TYPE_CONTEXT_LIMIT + 1
+
+
+def test_enrich_type_diagnostic_fails_open(tmp_path: Path) -> None:
+    diagnostic = f"{tmp_path / 'missing.py'}:1:1 - error: Cannot access attribute \"x\" for class \"User\""
+
+    assert _enrich_type_diagnostics(diagnostic, root=tmp_path) == diagnostic
