@@ -22,3 +22,8 @@ _Avoid_: Candidate Path, input file
 **Target Selection**:
 The conversion of Candidate Paths into Gate Targets under Workspace containment.
 _Avoid_: File discovery, path parsing
+
+**Excluded Folder**:
+A project-configured, Workspace-relative folder whose descendants are intentionally ineligible
+as Gate Targets. Exclusions defer quality-gate enforcement in that tree without weakening it
+elsewhere.

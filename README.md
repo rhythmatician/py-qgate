@@ -97,6 +97,25 @@ usage: qgate [command] [--codex-stdin] [--ci] [--fix]
 - `qgate --ci` checks all Gate Targets in the Workspace without modifying them.
 - `qgate --type-checker dmypy <paths...>` uses dmypy for local file checks.
 
+## Excluded folders
+
+Projects can make every Python file below selected Workspace-relative folders ineligible as a
+Gate Target:
+
+```toml
+[tool.qgate]
+excluded-folders = ["migrations", "generated/python"]
+```
+
+Both `/` and `\\` separators are accepted. Absolute paths and paths that resolve outside the
+Workspace are ignored. These exclusions apply consistently to full-Workspace checks, explicit
+Candidate Paths, and Codex Change Events. Qgate's built-in exclusions for caches, environments,
+artifacts, and temporary directories remain active.
+
+Excluded folders are a clean-as-you-touch boundary: existing deferred code stays outside the
+gates, but move a file out of an excluded folder (or remove the exclusion) when bringing that code
+under active maintenance so Ruff, the configured type checker, and custom guards all evaluate it.
+
 ## Feedback contract
 
 - Exit `0`: every gate passed; qgate writes nothing to stdout or stderr.
