@@ -58,14 +58,18 @@ invocation per enforcement layer over fallback copies of a prototype flow.
 
 ## 3. Install the convention
 
-Run this from the Workspace:
+Install qgate and its checker executables into the project's locked development environment:
 
 ```bash
-uvx --from git+https://github.com/rhythmatician/py-qgate qgate init
+uv add --dev "py-qgate @ git+https://github.com/rhythmatician/py-qgate" ruff pyright mypy
+uv run qgate init
 ```
 
-Review every write and skip reported by initialization. Existing files are inputs to the
-migration, not obstacles to overwrite. Reconcile them so the four layers have these roles:
+Confirm `uv.lock` records an exact qgate Git commit. Review every write and skip reported by
+initialization. Existing files are inputs to the migration, not obstacles to overwrite. Replace
+generated or retained floating `uvx --from git+...` qgate commands with `uv run qgate`, and make CI
+sync the committed lockfile before invoking qgate. Reconcile the four layers so they have these
+roles:
 
 - editor formatting normalizes human edits on save;
 - the PostToolUse hook normalizes LLM-agent edits and returns bounded failure feedback;
@@ -94,6 +98,9 @@ the user to review.
 Verify the installed configuration rather than assuming scaffolding succeeded:
 
 - exercise or inspect each of the four enforcement-layer commands;
+- confirm agent, pre-commit, CI, and manual commands execute qgate through `uv run` from the same
+  committed lockfile;
+- confirm no active qgate invocation independently resolves a Git branch, tag, or package version;
 - confirm upstream layers fix/check selected Gate Targets rather than sweeping unrelated files;
 - confirm CI performs a read-only full-Workspace check;
 - confirm successful agent checks emit no stdout or stderr;
