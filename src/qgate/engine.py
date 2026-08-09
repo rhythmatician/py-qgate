@@ -313,7 +313,11 @@ def run_gates(
         (
             (
                 "RUFF LINT",
-                _tool_command(ruff, ["check", "--output-format=concise"], command_targets),
+                _tool_command(
+                    ruff,
+                    ["check", "--quiet", "--output-format=concise"],
+                    command_targets,
+                ),
             ),
             (
                 type_checker.upper(),
