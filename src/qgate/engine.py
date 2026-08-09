@@ -227,7 +227,7 @@ def run_gates(
                 ),
                 (
                     "RUFF FORMAT",
-                    _tool_command(ruff, ["format"], command_targets),
+                    _tool_command(ruff, ["format", "--quiet"], command_targets),
                 ),
             )
         )
@@ -240,7 +240,7 @@ def run_gates(
         commands.append(
             (
                 "RUFF FORMAT CHECK",
-                _tool_command(ruff, [*format_arguments, "--check"], command_targets),
+                _tool_command(ruff, [*format_arguments, "--check", "--quiet"], command_targets),
             )
         )
     commands.extend(
