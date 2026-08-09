@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import re
 import shutil
 import subprocess
@@ -13,6 +14,13 @@ _GETATTR_LITERAL_PATTERN = re.compile(
     r"""getattr\(\s*[a-zA-Z_]\w*\s*,\s*(['"])(.*?)\1\s*,\s*None\s*\)""",
     re.DOTALL,
 )
+_TYPE_DIAGNOSTIC_PATTERN = re.compile(
+    r"^(?P<path>.+?):(?P<line>\d+):(?P<column>\d+) - error: "
+    r'Cannot access attribute "(?P<member>[^"]+)" for class "(?P<receiver>[^"]+)"',
+    re.MULTILINE,
+)
+_TYPE_CONTEXT_LIMIT = 1200
+_TYPE_CONTEXT_ITEM_LIMIT = 300
 
 
 def _run_command(command: list[str], root: Path) -> subprocess.CompletedProcess[str]:
@@ -76,6 +84,75 @@ def _custom_guard_errors(files: Sequence[Path], root: Path) -> list[str]:
     return errors
 
 
+def _short_type_context(
+    source_path: Path,
+    receiver: str,
+    member: str,
+) -> str | None:
+    try:
+        tree = ast.parse(source_path.read_text(encoding="utf-8"))
+    except (OSError, SyntaxError):
+        return None
+
+    receiver_name = receiver.split("|", 1)[0].strip()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ClassDef) or node.name != receiver_name:
+            continue
+        for child in node.body:
+            if (
+                isinstance(child, ast.AnnAssign)
+                and isinstance(child.target, ast.Name)
+                and child.target.id == member
+            ):
+                contract = f"{member}: {ast.unparse(child.annotation)}"
+                return _format_type_context(receiver, contract)
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)) and child.name == member:
+                returns = ast.unparse(child.returns) if child.returns else "Unknown"
+                contract = f"{member}(...) -> {returns}"
+                return _format_type_context(receiver, contract)
+    return None
+
+
+def _format_type_context(receiver: str, contract: str) -> str:
+    hint = ""
+    if "None" in receiver:
+        hint = "; hint: narrow None before access"
+    context = f"[TYPE CONTEXT] receiver={receiver}; member={contract}{hint}"
+    return context[:_TYPE_CONTEXT_ITEM_LIMIT]
+
+
+def _enrich_type_diagnostics(
+    output: str,
+    *,
+    root: Path,
+    max_chars: int = _TYPE_CONTEXT_LIMIT,
+) -> str:
+    """Add bounded local Python context to narrowly supported Pyright errors."""
+    root = root.resolve()
+    additions: list[str] = []
+    used = 0
+    for match in _TYPE_DIAGNOSTIC_PATTERN.finditer(output):
+        raw_path = Path(match.group("path"))
+        source_path = raw_path if raw_path.is_absolute() else root / raw_path
+        try:
+            source_path = source_path.resolve()
+            source_path.relative_to(root)
+        except ValueError:
+            continue
+        context = _short_type_context(
+            source_path,
+            match.group("receiver"),
+            match.group("member"),
+        )
+        if not context or used + len(context) + 1 > max_chars:
+            continue
+        additions.append(context)
+        used += len(context) + 1
+    if not additions:
+        return output
+    return f"{output.rstrip()}\n" + "\n".join(additions)
+
+
 def run_gates(
     *,
     files: list[Path],
@@ -119,7 +196,11 @@ def run_gates(
         (
             (
                 "RUFF LINT",
-                _tool_command(ruff, ["check", "--output-format=concise"], command_targets),
+                _tool_command(
+                    ruff,
+                    ["check", "--quiet", "--output-format=concise"],
+                    command_targets,
+                ),
             ),
             (
                 type_checker.upper(),
@@ -138,6 +219,7 @@ def run_gates(
     if not failures and not guard_errors:
         return 0
 
+    type_checker_label = type_checker.casefold()
     print(
         "[QUALITY GATE FAILED FOR: "
         + ", ".join(str(path.relative_to(root)) for path in files)
@@ -147,6 +229,8 @@ def run_gates(
     for label, result in failures:
         print(f"\n--- {label} ---", file=sys.stderr)
         output = "\n".join(part for part in (result.stdout or "", result.stderr or "") if part)
+        if label.casefold() == type_checker_label:
+            output = _enrich_type_diagnostics(output, root=root)
         print(output or f"command exited with status {result.returncode}", file=sys.stderr)
     if guard_errors:
         print("\n--- CUSTOM GUARDS ---", file=sys.stderr)
