@@ -1,62 +1,112 @@
 # py-qgate
 
-Unified, zero-token-drift quality gates for Python projects across **local dev**, **pre-commit hooks**, **CI**, and **AI co-developers (Codex)**.
+`py-qgate` packages one consistent Python quality-gate convention for reuse across projects.
+It keeps checks aligned across two axes: human and LLM-agent changes, and upstream file edits
+through downstream CI verification.
 
-`py-qgate` wraps **Ruff** (formatting & linting), **Pyright / dmypy** (type checking), and custom AST guards into a single, high-speed CLI binary.
+It coordinates the same tools and configuration across editor formatting, coding-agent hooks,
+pre-commit, and CI. For coding agents, qgate safely converts an untrusted Change Event into
+eligible Gate Targets and returns one of two outcomes:
 
----
+- success with no output and no agent-context cost;
+- concise, actionable diagnostics for the files that changed.
+
+The aim is to keep human developers and coding agents on the same page: both should receive the
+same formatting and quality policy close to the change that triggered it. A later developer
+should not discover and inherit formatting drift left by an earlier agent change.
+
+```text
+Change Event
+    -> Target Selection
+    -> repository-selected checks
+    -> silent success | bounded diagnostics
+```
+
+## Why qgate exists
+
+Python already has excellent formatters, linters, and type checkers. Qgate does not replace
+them. It packages an opinionated way to apply them consistently across the projects where it is
+installed, while supplying the missing integration seam between file-changing agents and those
+deterministic tools.
+
+The core is host-agnostic:
+
+- treat paths reported by external tools as untrusted;
+- select only existing Python files contained by the Workspace;
+- check only the affected Gate Targets when possible;
+- keep successful runs silent;
+- keep failure feedback bounded and useful.
+
+Codex PostToolUse events are the first supported Change Event adapter, not the limit of the
+design.
+
+## Four enforcement layers
+
+Each layer has a distinct responsibility:
+
+- **Editor formatting** normalizes human edits when the developer saves them.
+- **Agent feedback** normalizes agent edits immediately after the file-changing action and
+  reports actionable failures to the originating agent.
+- **Pre-commit** catches drift before history is written, but remains a backstop: if it rewrites
+  a file, the developer must review, stage, and retry the commit.
+- **CI** applies the same policy without modification as the authoritative final gate.
+
+The intended invariant is not merely identical configuration. Whether the change producer is a
+human or an LLM agent, it should settle its own formatting before the change is considered
+complete, rather than leaving an unrelated future editor save, commit, branch switch, or
+worktree to surface the drift. Downstream gates then verify the same convention without
+introducing a second interpretation of quality.
+
+## Current scope
+
+Qgate currently coordinates Ruff with Pyright or dmypy and includes a narrow custom AST guard.
+It can also scaffold an initial Codex hook, pre-commit hook, and CI workflow. Those scaffolds are
+convenience templates: repositories retain ownership of their tool configuration, editor
+settings, and CI policy.
+
+Qgate is a personal, reusable convention rather than a general-purpose quality platform. It is
+deliberately not:
+
+- a replacement for Ruff, Pyright, dmypy, pre-commit, or CI;
+- a universal Python quality platform;
+- a provider abstraction for agent hosts;
+- a source of broad semantic or repository context for agents.
 
 ## Quickstart
 
-Bootstrap quality gates into any Python repository in one command:
+Bootstrap the current templates into a Python repository:
 
 ```bash
-uvx --from git+[https://github.com/rhythmatician/py-qgate](https://github.com/rhythmatician/py-qgate) qgate init
+uvx --from git+https://github.com/rhythmatician/py-qgate qgate init
 ```
 
-This automatically scaffolds:
+Review generated files before committing them. Existing repositories may prefer to call qgate
+from their current hooks or workflows instead of adopting every scaffold.
 
-* `.codex/hooks.json` (PostToolUse agent feedback hook)
-* `.pre-commit-config.yaml` (Sub-second local git commit gate using `dmypy`)
-* `.github/workflows/ci.yml` (Authoritative GitHub Actions quality gate)
-* `pyproject.toml` (Appends default `[tool.ruff]` and `[tool.pyright]` configs if missing)
-
----
-
-## How It Works
-
-`qgate` enforces a single source of truth (`pyproject.toml`) across three distinct execution modes:
-
-| Mode | Command | Engine | Goal |
-| --- | --- | --- | --- |
-| **Pre-Commit** | `qgate --fix --type-checker dmypy <files>` | Ruff + `dmypy` | Sub-second (`<0.5s`) local commit check |
-| **Agent Hook** | `qgate --codex-stdin --fix` | Ruff + `pyright` | Instant post-edit feedback & auto-formatting |
-| **CI Gate** | `qgate --ci` | Ruff + `pyright` | Authoritative, read-only quality check |
-
----
-
-## CLI Reference
+## Usage
 
 ```text
-usage: qgate [command] [--codex-stdin] [--ci] [--fix] [--type-checker {pyright,dmypy}] [paths ...]
-
+usage: qgate [command] [--codex-stdin] [--ci] [--fix]
+             [--type-checker {pyright,dmypy}] [paths ...]
 ```
 
-### Commands
+- `qgate init` scaffolds the current integration templates.
+- `qgate <paths...>` checks selected Python files.
+- `qgate --codex-stdin --fix` reads one Codex PostToolUse Change Event, applies safe Ruff fixes
+  and formatting, then checks the selected Gate Targets with Pyright.
+- `qgate --ci` checks all Gate Targets in the Workspace without modifying them.
+- `qgate --type-checker dmypy <paths...>` uses dmypy for local file checks.
 
-* `qgate init`: Scaffold configuration templates into the current working directory.
-* `qgate [paths...]`: Run quality checks against specific files or directories.
+## Feedback contract
 
-### Flags
+- Exit `0`: every gate passed; qgate writes nothing to stdout or stderr.
+- Exit `2`: one or more gates failed; qgate writes concise diagnostics to stderr.
+- Malformed or irrelevant Change Events select no Gate Targets and succeed silently.
 
-* `--fix`: Run `ruff check --fix` and `ruff format` before type checking.
-* `--ci`: Check all Python files in the workspace in read-only mode (fails on unformatted code).
-* `--codex-stdin`: Parse JSON payloads from Codex `PostToolUse` stdin events to target modified files.
-* `--type-checker {pyright,dmypy}`: Choose the type-checking engine (default: `pyright`).
+## Design direction
 
----
-
-## Exit Codes & Output Contract
-
-* **`0`**: All checks passed. Outputs nothing to stdout/stderr (zero-token footprint for agents).
-* **`2`**: One or more quality gates failed. Prints formatted diagnostic errors to `stderr`.
+Near-term work should preserve parity across the four enforcement layers while deepening the
+Change Event -> Target Selection -> feedback path. Agent-specific behavior should be validated
+by whether it enables self-correction with less time and context than full-repository checks.
+Additional host adapters should be added only when a second real integration proves the seam,
+not in anticipation of one.
