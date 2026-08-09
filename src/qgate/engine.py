@@ -11,9 +11,7 @@ from collections.abc import Iterator, Sequence
 from pathlib import Path
 from typing import TextIO
 
-type JsonValue = (
-    None | bool | int | float | str | list[JsonValue] | dict[str, JsonValue]
-)
+type JsonValue = None | bool | int | float | str | list[JsonValue] | dict[str, JsonValue]
 
 
 _EXCLUDED_DIRECTORIES = {
@@ -103,9 +101,7 @@ def _working_directory(payload: dict[str, JsonValue], root: Path) -> Path:
     return resolved if resolved.is_dir() else root
 
 
-def _resolve_python_files(
-    candidates: Sequence[str], root: Path, base_dir: Path
-) -> list[Path]:
+def _resolve_python_files(candidates: Sequence[str], root: Path, base_dir: Path) -> list[Path]:
     files: set[Path] = set()
     for raw_candidate in candidates:
         candidate_text = raw_candidate.strip().strip("\"'")
@@ -168,9 +164,7 @@ def _tool_path(name: str, root: Path) -> str:
     return name
 
 
-def _tool_command(
-    tool: str, arguments: Sequence[str], files: Sequence[Path]
-) -> list[str]:
+def _tool_command(tool: str, arguments: Sequence[str], files: Sequence[Path]) -> list[str]:
     return [tool, *arguments, *(str(path) for path in files)]
 
 
@@ -233,9 +227,7 @@ def run_gates(
         )
     format_arguments = ["format"]
     if ci:
-        format_arguments.extend(
-            ("--exclude", "*.md", "--exclude", "*.ipynb", "--exclude", "*.pyi")
-        )
+        format_arguments.extend(("--exclude", "*.md", "--exclude", "*.ipynb", "--exclude", "*.pyi"))
     if not fix:
         commands.append(
             (
@@ -247,9 +239,7 @@ def run_gates(
         (
             (
                 "RUFF LINT",
-                _tool_command(
-                    ruff, ["check", "--output-format=concise"], command_targets
-                ),
+                _tool_command(ruff, ["check", "--output-format=concise"], command_targets),
             ),
             (
                 type_checker.upper(),
@@ -262,13 +252,9 @@ def run_gates(
         )
     )
 
-    command_results = [
-        (label, _run_command(command, root)) for label, command in commands
-    ]
+    command_results = [(label, _run_command(command, root)) for label, command in commands]
     guard_errors = _custom_guard_errors(files, root)
-    failures = [
-        (label, result) for label, result in command_results if result.returncode != 0
-    ]
+    failures = [(label, result) for label, result in command_results if result.returncode != 0]
     if not failures and not guard_errors:
         return 0
 
@@ -280,12 +266,8 @@ def run_gates(
     )
     for label, result in failures:
         print(f"\n--- {label} ---", file=sys.stderr)
-        output = "\n".join(
-            part for part in (result.stdout or "", result.stderr or "") if part
-        )
-        print(
-            output or f"command exited with status {result.returncode}", file=sys.stderr
-        )
+        output = "\n".join(part for part in (result.stdout or "", result.stderr or "") if part)
+        print(output or f"command exited with status {result.returncode}", file=sys.stderr)
     if guard_errors:
         print("\n--- CUSTOM GUARDS ---", file=sys.stderr)
         print("\n".join(guard_errors), file=sys.stderr)
