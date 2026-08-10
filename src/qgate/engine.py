@@ -64,7 +64,7 @@ def _tool_commands(
     *,
     bounded: bool,
 ) -> list[list[str]]:
-    """Build exact-target commands, batching full-Workspace runs for Windows safety."""
+    """Build exact-target commands, batching long runs for Windows safety."""
     if not bounded:
         return [_tool_command(tool, arguments, files)]
 
@@ -83,6 +83,32 @@ def _tool_commands(
     if len(batch) > len(prefix):
         batches.append(batch)
     return batches
+
+
+def _coherent_pyright_targets(files: Sequence[Path], root: Path) -> list[Path]:
+    """Compact a complete selected tree without splitting Pyright analysis."""
+    command = _tool_command("pyright", [], files)
+    if len(subprocess.list2cmdline(command)) <= _WINDOWS_SAFE_COMMAND_LENGTH:
+        return list(files)
+
+    selected = {path.resolve() for path in files}
+    candidates = {root.resolve()}
+    for path in selected:
+        parent = path.parent
+        while parent != root.resolve() and root.resolve() in parent.parents:
+            candidates.add(parent)
+            parent = parent.parent
+
+    remaining = selected.copy()
+    targets: list[Path] = []
+    for directory in sorted(candidates, key=lambda path: len(path.parts)):
+        descendants = {path.resolve() for path in directory.rglob("*.py")}
+        if descendants and descendants <= remaining:
+            targets.append(directory)
+            remaining -= descendants
+
+    targets.extend(sorted(remaining))
+    return sorted(targets)
 
 
 def _ci_command_targets(files: Sequence[Path], root: Path) -> list[Path]:
@@ -200,20 +226,27 @@ def run_gates(
     tc = _tool_path(type_checker, root)
     commands: list[tuple[str, list[str]]] = []
 
-    def add_commands(label: str, tool: str, arguments: Sequence[str]) -> None:
+    def add_commands(
+        label: str,
+        tool: str,
+        arguments: Sequence[str],
+        *,
+        targets: Sequence[Path] = command_targets,
+        bounded: bool = False,
+    ) -> None:
         commands.extend(
             (label, command)
             for command in _tool_commands(
                 tool,
                 arguments,
-                command_targets,
-                bounded=full_workspace and not ci,
+                targets,
+                bounded=bounded,
             )
         )
 
     if fix:
-        add_commands("RUFF SAFE FIXES", ruff, ["check", "--fix", "--quiet"])
-        add_commands("RUFF FORMAT", ruff, ["format", "--quiet"])
+        add_commands("RUFF SAFE FIXES", ruff, ["check", "--fix", "--quiet"], bounded=not ci)
+        add_commands("RUFF FORMAT", ruff, ["format", "--quiet"], bounded=not ci)
     format_arguments = ["format"]
     if ci:
         format_arguments.extend(("--exclude", "*.md", "--exclude", "*.ipynb", "--exclude", "*.pyi"))
@@ -222,16 +255,23 @@ def run_gates(
             "RUFF FORMAT CHECK",
             ruff,
             [*format_arguments, "--check", "--quiet"],
+            bounded=not ci,
         )
     add_commands(
         "RUFF LINT",
         ruff,
         ["check", "--quiet", "--output-format=concise"],
+        bounded=not ci,
     )
+    type_targets = command_targets
+    if type_checker == "pyright" and not ci:
+        type_targets = _coherent_pyright_targets(command_targets, root)
     add_commands(
         type_checker.upper(),
         tc,
         ["run", "--"] if type_checker == "dmypy" else [],
+        targets=type_targets,
+        bounded=not ci,
     )
 
     command_results = [(label, _run_command(command, root)) for label, command in commands]
