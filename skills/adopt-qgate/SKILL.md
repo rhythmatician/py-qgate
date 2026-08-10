@@ -81,7 +81,7 @@ is present. Edit mixed-purpose files in place; keep their unrelated responsibili
 
 ## 4. Bootstrap the baseline
 
-Run qgate with fixes across the Workspace. Review the diff, including a large mechanical
+Run `uv run qgate --fix` across the Workspace. Review the diff, including a large mechanical
 formatting diff when required, then resolve the remaining diagnostics. The steady-state policy
 is clean-as-you-touch: an upstream change owns every failure in its selected Gate Targets, while
 CI protects the full Workspace.
@@ -107,6 +107,11 @@ Verify the installed configuration rather than assuming scaffolding succeeded:
 - search again for obsolete prototype invocations and dependencies;
 - run the repository's relevant tests for any configuration or code changed during migration.
 
+Follow every yielded or live validation session through terminal completion. Record its final
+exit code; count only exit code 0 as success. Treat silence as the expected success output only
+after observing that exit code.
+
 Finish only when every inventory row is accounted for, retained checks still run, superseded
-paths are gone, and the qgate fix and CI paths both pass. Report the resulting four-layer matrix,
-the removed and retained behavior, validation performed, and any intentionally deferred work.
+paths are gone, `uv run qgate --fix` and `uv run --locked qgate --ci` both exit 0, and every other
+validation has a recorded terminal exit code. Report the resulting four-layer matrix, the removed
+and retained behavior, validation performed, and any intentionally deferred work.
