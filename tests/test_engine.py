@@ -53,7 +53,7 @@ def test_run_gates_success_is_silent(
     assert captured.err == ""
 
 
-def test_full_workspace_fix_batches_command_targets_below_windows_limit(
+def test_fix_batches_command_targets_below_windows_limit(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -73,7 +73,7 @@ def test_full_workspace_fix_batches_command_targets_below_windows_limit(
     monkeypatch.setattr("qgate.engine._run_command", run_command)
     monkeypatch.setattr("qgate.engine._custom_guard_errors", no_guard_errors)
 
-    assert run_gates(files=sources, root=tmp_path, fix=True, full_workspace=True) == 0
+    assert run_gates(files=sources, root=tmp_path, fix=True, type_checker="dmypy") == 0
     assert commands
     assert all(len(subprocess.list2cmdline(command)) <= 16_000 for command in commands)
     assert {
@@ -127,6 +127,30 @@ def test_large_explicit_target_set_batches_ruff_but_keeps_one_coherent_pyright_r
     assert len(ruff_commands) > 1
     assert all(len(subprocess.list2cmdline(command)) <= 16_000 for command in ruff_commands)
     assert pyright_commands == [[pyright_commands[0][0], str(tmp_path)]]
+
+
+def test_large_partial_target_set_fails_instead_of_splitting_pyright(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    package = tmp_path / "package"
+    package.mkdir()
+    sources = [package / (f"long_module_{index:04d}_" + "x" * 48 + ".py") for index in range(700)]
+    for source in sources:
+        source.touch()
+    (package / "unselected.py").touch()
+    commands: list[list[str]] = []
+
+    def run_command(command: list[str], root: Path) -> subprocess.CompletedProcess[str]:
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr("qgate.engine._run_command", run_command)
+
+    assert run_gates(files=sources, root=tmp_path, fix=True) == 2
+    assert not [command for command in commands if "pyright" in command[0]]
+    assert "cannot run one coherent Pyright analysis" in capsys.readouterr().err
 
 
 def test_dmypy_respects_project_owned_mypy_configuration(

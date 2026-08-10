@@ -77,8 +77,12 @@ deliberately not:
 Bootstrap the current templates into a Python repository:
 
 ```bash
-uvx --from git+https://github.com/rhythmatician/py-qgate qgate init
+uv add --dev "py-qgate @ git+https://github.com/rhythmatician/py-qgate" ruff pyright mypy
+uv run qgate init
 ```
+
+Commit the resulting `uv.lock`; generated agent, pre-commit, and CI commands execute that locked,
+project-local qgate installation.
 
 Review generated files before committing them. Existing repositories may prefer to call qgate
 from their current hooks or workflows instead of adopting every scaffold.

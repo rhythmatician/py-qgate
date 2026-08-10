@@ -43,7 +43,12 @@ def test_run_init_creates_files(tmp_path: Path) -> None:
     assert "entry: uv run qgate --fix --type-checker dmypy" in pre_commit
     assert "require_serial: true" in pre_commit
     assert "uvx" not in pre_commit
-    assert (tmp_path / ".github" / "workflows" / "ci.yml").exists()
+    hooks = (tmp_path / ".codex" / "hooks.json").read_text()
+    ci = (tmp_path / ".github" / "workflows" / "ci.yml").read_text()
+    assert "uv run qgate --codex-stdin --fix" in hooks
+    assert "uv run --locked qgate --ci" in ci
+    assert "uvx" not in hooks
+    assert "uvx" not in ci
     settings = json.loads((tmp_path / ".vscode" / "settings.json").read_text())
     assert settings["editor.formatOnSave"] is True
 
