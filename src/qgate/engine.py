@@ -85,17 +85,18 @@ def _tool_commands(
     return batches
 
 
-def _coherent_pyright_targets(files: Sequence[Path], root: Path) -> list[Path]:
+def _coherent_pyright_targets(files: Sequence[Path], root: Path) -> list[Path] | None:
     """Compact a complete selected tree without splitting Pyright analysis."""
     command = _tool_command("pyright", [], files)
     if len(subprocess.list2cmdline(command)) <= _WINDOWS_SAFE_COMMAND_LENGTH:
         return list(files)
 
+    workspace = root.resolve()
     selected = {path.resolve() for path in files}
-    candidates = {root.resolve()}
+    candidates = {workspace}
     for path in selected:
         parent = path.parent
-        while parent != root.resolve() and root.resolve() in parent.parents:
+        while parent != workspace and workspace in parent.parents:
             candidates.add(parent)
             parent = parent.parent
 
@@ -108,7 +109,11 @@ def _coherent_pyright_targets(files: Sequence[Path], root: Path) -> list[Path]:
             remaining -= descendants
 
     targets.extend(sorted(remaining))
-    return sorted(targets)
+    compacted = sorted(targets)
+    command = _tool_command("pyright", [], compacted)
+    if len(subprocess.list2cmdline(command)) > _WINDOWS_SAFE_COMMAND_LENGTH:
+        return None
+    return compacted
 
 
 def _ci_command_targets(files: Sequence[Path], root: Path) -> list[Path]:
@@ -214,7 +219,6 @@ def run_gates(
     root: Path,
     ci: bool = False,
     fix: bool = False,
-    full_workspace: bool = False,
     type_checker: str = "pyright",
 ) -> int:
     """Run quality gates on the given files and return an exit code."""
@@ -266,12 +270,20 @@ def run_gates(
     type_targets = command_targets
     if type_checker == "pyright" and not ci:
         type_targets = _coherent_pyright_targets(command_targets, root)
+        if type_targets is None:
+            print(
+                "[QUALITY GATE FAILED]\n\n--- PYRIGHT ---\n"
+                "Selected Gate Targets exceed the Windows command-line limit, and qgate "
+                "cannot run one coherent Pyright analysis without including unselected files.",
+                file=sys.stderr,
+            )
+            return 2
     add_commands(
         type_checker.upper(),
         tc,
         ["run", "--"] if type_checker == "dmypy" else [],
         targets=type_targets,
-        bounded=not ci,
+        bounded=not ci and type_checker != "pyright",
     )
 
     command_results = [(label, _run_command(command, root)) for label, command in commands]

@@ -330,7 +330,6 @@ def main(
         root=root,
         ci=args.ci,
         fix=args.fix,
-        full_workspace=not all_paths and not args.codex_stdin,
         type_checker=args.type_checker,
     )
 
