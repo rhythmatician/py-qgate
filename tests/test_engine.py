@@ -103,6 +103,32 @@ def test_explicit_fix_keeps_selected_gate_targets_in_each_command(
     assert all(command[-2:] == [str(path) for path in sources] for command in commands)
 
 
+def test_large_explicit_target_set_batches_ruff_but_keeps_one_coherent_pyright_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    package = tmp_path / "package"
+    package.mkdir()
+    sources = [package / (f"long_module_{index:04d}_" + "x" * 48 + ".py") for index in range(700)]
+    for source in sources:
+        source.touch()
+    commands: list[list[str]] = []
+
+    def run_command(command: list[str], root: Path) -> subprocess.CompletedProcess[str]:
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr("qgate.engine._run_command", run_command)
+
+    assert run_gates(files=sources, root=tmp_path, fix=True) == 0
+
+    ruff_commands = [command for command in commands if "ruff" in command[0]]
+    pyright_commands = [command for command in commands if "pyright" in command[0]]
+    assert len(ruff_commands) > 1
+    assert all(len(subprocess.list2cmdline(command)) <= 16_000 for command in ruff_commands)
+    assert pyright_commands == [[pyright_commands[0][0], str(tmp_path)]]
+
+
 def test_dmypy_respects_project_owned_mypy_configuration(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
