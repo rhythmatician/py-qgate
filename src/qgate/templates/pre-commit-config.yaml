@@ -4,6 +4,7 @@ repos:
       - id: qgate
         name: Quality Gate
         language: system
-        entry: uvx --from git+https://github.com/rhythmatician/py-qgate qgate --fix --type-checker dmypy
+        entry: uv run qgate --fix --type-checker dmypy
         types: [python]
         pass_filenames: true
+        require_serial: true
