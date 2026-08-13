@@ -16,6 +16,23 @@ from qgate.engine import (
 )
 
 
+def record_successful_commands(
+    monkeypatch: pytest.MonkeyPatch,
+) -> list[list[str]]:
+    commands: list[list[str]] = []
+
+    def run_command(command: list[str], root: Path) -> subprocess.CompletedProcess[str]:
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr("qgate.engine._run_command", run_command)
+    return commands
+
+
+def no_guard_errors(_files: Sequence[Path], _root: Path) -> list[str]:
+    return []
+
+
 def test_custom_guard_errors_clean(tmp_path: Path) -> None:
     f = tmp_path / "clean.py"
     f.write_text("x = obj.attr\n")
@@ -61,16 +78,7 @@ def test_fix_batches_command_targets_below_windows_limit(
         tmp_path / f"package_{index:04d}" / ("long_module_name_" + "x" * 48 + ".py")
         for index in range(700)
     ]
-    commands: list[list[str]] = []
-
-    def run_command(command: list[str], root: Path) -> subprocess.CompletedProcess[str]:
-        commands.append(command)
-        return subprocess.CompletedProcess(command, 0, "", "")
-
-    def no_guard_errors(_files: Sequence[Path], _root: Path) -> list[str]:
-        return []
-
-    monkeypatch.setattr("qgate.engine._run_command", run_command)
+    commands = record_successful_commands(monkeypatch)
     monkeypatch.setattr("qgate.engine._custom_guard_errors", no_guard_errors)
 
     assert run_gates(files=sources, root=tmp_path, fix=True, type_checker="dmypy") == 0
@@ -86,16 +94,7 @@ def test_explicit_fix_keeps_selected_gate_targets_in_each_command(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     sources = [tmp_path / "first.py", tmp_path / "second.py"]
-    commands: list[list[str]] = []
-
-    def run_command(command: list[str], root: Path) -> subprocess.CompletedProcess[str]:
-        commands.append(command)
-        return subprocess.CompletedProcess(command, 0, "", "")
-
-    def no_guard_errors(_files: Sequence[Path], _root: Path) -> list[str]:
-        return []
-
-    monkeypatch.setattr("qgate.engine._run_command", run_command)
+    commands = record_successful_commands(monkeypatch)
     monkeypatch.setattr("qgate.engine._custom_guard_errors", no_guard_errors)
 
     assert run_gates(files=sources, root=tmp_path, fix=True) == 0
@@ -112,13 +111,7 @@ def test_ci_ruff_keeps_exact_gate_targets_while_pyright_uses_compact_directories
     source = docs / "example.py"
     source.write_text("x = 1\n")
     (docs / "example.md").write_text("```python\ninvalid python\n```\n")
-    commands: list[list[str]] = []
-
-    def run_command(command: list[str], root: Path) -> subprocess.CompletedProcess[str]:
-        commands.append(command)
-        return subprocess.CompletedProcess(command, 0, "", "")
-
-    monkeypatch.setattr("qgate.engine._run_command", run_command)
+    commands = record_successful_commands(monkeypatch)
 
     assert run_gates(files=[source], root=tmp_path, ci=True) == 0
 
@@ -138,16 +131,7 @@ def test_ci_batches_long_exact_ruff_target_lists(
         tmp_path / "docs" / f"package_{index:04d}" / ("long_module_name_" + "x" * 48 + ".py")
         for index in range(700)
     ]
-    commands: list[list[str]] = []
-
-    def run_command(command: list[str], root: Path) -> subprocess.CompletedProcess[str]:
-        commands.append(command)
-        return subprocess.CompletedProcess(command, 0, "", "")
-
-    def no_guard_errors(_files: Sequence[Path], _root: Path) -> list[str]:
-        return []
-
-    monkeypatch.setattr("qgate.engine._run_command", run_command)
+    commands = record_successful_commands(monkeypatch)
     monkeypatch.setattr("qgate.engine._custom_guard_errors", no_guard_errors)
 
     assert run_gates(files=sources, root=tmp_path, ci=True) == 0
@@ -163,6 +147,21 @@ def test_ci_batches_long_exact_ruff_target_lists(
     } == set(sources)
 
 
+def test_ci_dmypy_keeps_exact_gate_targets(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "package" / "example.py"
+    source.parent.mkdir()
+    source.write_text("x = 1\n")
+    commands = record_successful_commands(monkeypatch)
+
+    assert run_gates(files=[source], root=tmp_path, ci=True, type_checker="dmypy") == 0
+
+    dmypy_commands = [command for command in commands if "dmypy" in command[0]]
+    assert dmypy_commands == [[dmypy_commands[0][0], "run", "--", str(source)]]
+
+
 def test_large_explicit_target_set_batches_ruff_but_keeps_one_coherent_pyright_run(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -172,13 +171,7 @@ def test_large_explicit_target_set_batches_ruff_but_keeps_one_coherent_pyright_r
     sources = [package / (f"long_module_{index:04d}_" + "x" * 48 + ".py") for index in range(700)]
     for source in sources:
         source.touch()
-    commands: list[list[str]] = []
-
-    def run_command(command: list[str], root: Path) -> subprocess.CompletedProcess[str]:
-        commands.append(command)
-        return subprocess.CompletedProcess(command, 0, "", "")
-
-    monkeypatch.setattr("qgate.engine._run_command", run_command)
+    commands = record_successful_commands(monkeypatch)
 
     assert run_gates(files=sources, root=tmp_path, fix=True) == 0
 
@@ -200,13 +193,7 @@ def test_large_partial_target_set_fails_instead_of_splitting_pyright(
     for source in sources:
         source.touch()
     (package / "unselected.py").touch()
-    commands: list[list[str]] = []
-
-    def run_command(command: list[str], root: Path) -> subprocess.CompletedProcess[str]:
-        commands.append(command)
-        return subprocess.CompletedProcess(command, 0, "", "")
-
-    monkeypatch.setattr("qgate.engine._run_command", run_command)
+    commands = record_successful_commands(monkeypatch)
 
     assert run_gates(files=sources, root=tmp_path, fix=True) == 2
     assert not [command for command in commands if "pyright" in command[0]]
@@ -219,13 +206,7 @@ def test_dmypy_respects_project_owned_mypy_configuration(
 ) -> None:
     source = tmp_path / "clean.py"
     source.write_text("x = 1\n")
-    commands: list[list[str]] = []
-
-    def run_command(command: list[str], root: Path) -> subprocess.CompletedProcess[str]:
-        commands.append(command)
-        return subprocess.CompletedProcess(command, 0, "", "")
-
-    monkeypatch.setattr("qgate.engine._run_command", run_command)
+    commands = record_successful_commands(monkeypatch)
 
     assert run_gates(files=[source], root=tmp_path, type_checker="dmypy") == 0
     dmypy_commands = [command for command in commands if "dmypy" in command[0]]
