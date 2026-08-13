@@ -266,7 +266,7 @@ def run_gates(
         ["check", "--quiet", "--output-format=concise"],
         bounded=True,
     )
-    type_targets = _ci_command_targets(files, root) if ci else files
+    type_targets = _ci_command_targets(files, root) if ci and type_checker == "pyright" else files
     if type_checker == "pyright" and not ci:
         type_targets = _coherent_pyright_targets(files, root)
         if type_targets is None:
@@ -282,7 +282,7 @@ def run_gates(
         tc,
         ["run", "--"] if type_checker == "dmypy" else [],
         targets=type_targets,
-        bounded=not ci and type_checker != "pyright",
+        bounded=type_checker != "pyright",
     )
 
     command_results = [(label, _run_command(command, root)) for label, command in commands]
