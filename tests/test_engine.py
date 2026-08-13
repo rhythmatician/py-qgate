@@ -103,6 +103,66 @@ def test_explicit_fix_keeps_selected_gate_targets_in_each_command(
     assert all(command[-2:] == [str(path) for path in sources] for command in commands)
 
 
+def test_ci_ruff_keeps_exact_gate_targets_while_pyright_uses_compact_directories(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    source = docs / "example.py"
+    source.write_text("x = 1\n")
+    (docs / "example.md").write_text("```python\ninvalid python\n```\n")
+    commands: list[list[str]] = []
+
+    def run_command(command: list[str], root: Path) -> subprocess.CompletedProcess[str]:
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr("qgate.engine._run_command", run_command)
+
+    assert run_gates(files=[source], root=tmp_path, ci=True) == 0
+
+    ruff_commands = [command for command in commands if "ruff" in command[0]]
+    pyright_commands = [command for command in commands if "pyright" in command[0]]
+    assert ruff_commands
+    assert all(str(source) in command for command in ruff_commands)
+    assert all(str(Path("docs")) not in command for command in ruff_commands)
+    assert pyright_commands == [[pyright_commands[0][0], str(Path("docs"))]]
+
+
+def test_ci_batches_long_exact_ruff_target_lists(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sources = [
+        tmp_path / "docs" / f"package_{index:04d}" / ("long_module_name_" + "x" * 48 + ".py")
+        for index in range(700)
+    ]
+    commands: list[list[str]] = []
+
+    def run_command(command: list[str], root: Path) -> subprocess.CompletedProcess[str]:
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    def no_guard_errors(_files: Sequence[Path], _root: Path) -> list[str]:
+        return []
+
+    monkeypatch.setattr("qgate.engine._run_command", run_command)
+    monkeypatch.setattr("qgate.engine._custom_guard_errors", no_guard_errors)
+
+    assert run_gates(files=sources, root=tmp_path, ci=True) == 0
+
+    ruff_commands = [command for command in commands if "ruff" in command[0]]
+    assert len(ruff_commands) > 1
+    assert all(len(subprocess.list2cmdline(command)) <= 16_000 for command in ruff_commands)
+    assert {
+        Path(argument)
+        for command in ruff_commands
+        for argument in command
+        if argument.endswith(".py")
+    } == set(sources)
+
+
 def test_large_explicit_target_set_batches_ruff_but_keeps_one_coherent_pyright_run(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

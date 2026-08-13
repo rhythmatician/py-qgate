@@ -225,7 +225,6 @@ def run_gates(
     if not files:
         return 0
 
-    command_targets = _ci_command_targets(files, root) if ci else files
     ruff = _tool_path("ruff", root)
     tc = _tool_path(type_checker, root)
     commands: list[tuple[str, list[str]]] = []
@@ -235,7 +234,7 @@ def run_gates(
         tool: str,
         arguments: Sequence[str],
         *,
-        targets: Sequence[Path] = command_targets,
+        targets: Sequence[Path] = files,
         bounded: bool = False,
     ) -> None:
         commands.extend(
@@ -249,8 +248,8 @@ def run_gates(
         )
 
     if fix:
-        add_commands("RUFF SAFE FIXES", ruff, ["check", "--fix", "--quiet"], bounded=not ci)
-        add_commands("RUFF FORMAT", ruff, ["format", "--quiet"], bounded=not ci)
+        add_commands("RUFF SAFE FIXES", ruff, ["check", "--fix", "--quiet"], bounded=True)
+        add_commands("RUFF FORMAT", ruff, ["format", "--quiet"], bounded=True)
     format_arguments = ["format"]
     if ci:
         format_arguments.extend(("--exclude", "*.md", "--exclude", "*.ipynb", "--exclude", "*.pyi"))
@@ -259,17 +258,17 @@ def run_gates(
             "RUFF FORMAT CHECK",
             ruff,
             [*format_arguments, "--check", "--quiet"],
-            bounded=not ci,
+            bounded=True,
         )
     add_commands(
         "RUFF LINT",
         ruff,
         ["check", "--quiet", "--output-format=concise"],
-        bounded=not ci,
+        bounded=True,
     )
-    type_targets = command_targets
+    type_targets = _ci_command_targets(files, root) if ci else files
     if type_checker == "pyright" and not ci:
-        type_targets = _coherent_pyright_targets(command_targets, root)
+        type_targets = _coherent_pyright_targets(files, root)
         if type_targets is None:
             print(
                 "[QUALITY GATE FAILED]\n\n--- PYRIGHT ---\n"
