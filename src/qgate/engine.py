@@ -22,6 +22,7 @@ _TYPE_DIAGNOSTIC_PATTERN = re.compile(
 _TYPE_CONTEXT_LIMIT = 1200
 _TYPE_CONTEXT_ITEM_LIMIT = 300
 _WINDOWS_SAFE_COMMAND_LENGTH = 16_000
+_COMMAND_TIMEOUT_SECONDS = 300
 
 
 def _run_command(command: list[str], root: Path) -> subprocess.CompletedProcess[str]:
@@ -32,6 +33,15 @@ def _run_command(command: list[str], root: Path) -> subprocess.CompletedProcess[
             check=False,
             capture_output=True,
             text=True,
+            timeout=_COMMAND_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        rendered_command = subprocess.list2cmdline(command)
+        return subprocess.CompletedProcess(
+            command,
+            124,
+            "",
+            f"{rendered_command} timed out after {_COMMAND_TIMEOUT_SECONDS} seconds",
         )
     except OSError as exc:
         return subprocess.CompletedProcess(command, 127, "", str(exc))
