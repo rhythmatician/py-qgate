@@ -14,7 +14,7 @@ Uses the five default labels: `needs-triage`, `needs-info`, `ready-for-agent`, `
 
 ### Domain docs
 
-Uses a single-context layout with root `CONTEXT.md` and `docs/adr/`. See `docs/agents/domain.md`.
+Uses a single-context layout with root `GLOSSARY.md` and `docs/adr/`. See `docs/agents/domain.md`.
 
 ### Phase 2: Python symbol inspection
 
