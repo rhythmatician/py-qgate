@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import ast
+import contextlib
+import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 from collections.abc import Sequence
@@ -22,29 +25,221 @@ _TYPE_DIAGNOSTIC_PATTERN = re.compile(
 _TYPE_CONTEXT_LIMIT = 1200
 _TYPE_CONTEXT_ITEM_LIMIT = 300
 _WINDOWS_SAFE_COMMAND_LENGTH = 16_000
+_WINDOWS_CREATE_SUSPENDED = 0x00000004
 _COMMAND_TIMEOUT_SECONDS = 300
+_OUTPUT_DRAIN_SECONDS = 1
+
+
+class _WindowsJob:
+    """Keep a checker and its descendants in one terminable Windows job."""
+
+    def __init__(self, process: subprocess.Popen[str]) -> None:
+        import ctypes
+        from ctypes import wintypes
+
+        class BasicLimitInformation(ctypes.Structure):
+            _fields_ = [
+                ("PerProcessUserTimeLimit", ctypes.c_int64),
+                ("PerJobUserTimeLimit", ctypes.c_int64),
+                ("LimitFlags", wintypes.DWORD),
+                ("MinimumWorkingSetSize", ctypes.c_size_t),
+                ("MaximumWorkingSetSize", ctypes.c_size_t),
+                ("ActiveProcessLimit", wintypes.DWORD),
+                ("Affinity", ctypes.c_size_t),
+                ("PriorityClass", wintypes.DWORD),
+                ("SchedulingClass", wintypes.DWORD),
+            ]
+
+        class IoCounters(ctypes.Structure):
+            _fields_ = [
+                ("ReadOperationCount", ctypes.c_uint64),
+                ("WriteOperationCount", ctypes.c_uint64),
+                ("OtherOperationCount", ctypes.c_uint64),
+                ("ReadTransferCount", ctypes.c_uint64),
+                ("WriteTransferCount", ctypes.c_uint64),
+                ("OtherTransferCount", ctypes.c_uint64),
+            ]
+
+        class ExtendedLimitInformation(ctypes.Structure):
+            _fields_ = [
+                ("BasicLimitInformation", BasicLimitInformation),
+                ("IoInfo", IoCounters),
+                ("ProcessMemoryLimit", ctypes.c_size_t),
+                ("JobMemoryLimit", ctypes.c_size_t),
+                ("PeakProcessMemoryUsed", ctypes.c_size_t),
+                ("PeakJobMemoryUsed", ctypes.c_size_t),
+            ]
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateJobObjectW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p]
+        kernel32.CreateJobObjectW.restype = wintypes.HANDLE
+        kernel32.SetInformationJobObject.argtypes = [
+            wintypes.HANDLE,
+            wintypes.INT,
+            ctypes.c_void_p,
+            wintypes.DWORD,
+        ]
+        kernel32.SetInformationJobObject.restype = wintypes.BOOL
+        kernel32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+        kernel32.AssignProcessToJobObject.restype = wintypes.BOOL
+        kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.TerminateJobObject.argtypes = [wintypes.HANDLE, wintypes.UINT]
+        kernel32.TerminateJobObject.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+
+        handle = kernel32.CreateJobObjectW(None, None)
+        if not handle:
+            raise ctypes.WinError(ctypes.get_last_error())
+        self._kernel32 = kernel32
+        self._handle = handle
+        try:
+            self._limits = ExtendedLimitInformation()
+            self._limits.BasicLimitInformation.LimitFlags = 0x2000  # KILL_ON_JOB_CLOSE
+            if not kernel32.SetInformationJobObject(
+                handle, 9, ctypes.byref(self._limits), ctypes.sizeof(self._limits)
+            ):
+                raise ctypes.WinError(ctypes.get_last_error())
+            # Popen holds the suspended process, so its PID cannot be reused here.
+            process_handle = kernel32.OpenProcess(0x0101, False, process.pid)
+            if not process_handle:
+                raise ctypes.WinError(ctypes.get_last_error())
+            try:
+                if not kernel32.AssignProcessToJobObject(handle, process_handle):
+                    raise ctypes.WinError(ctypes.get_last_error())
+            finally:
+                kernel32.CloseHandle(process_handle)
+            self._resume(process.pid)
+        except BaseException:
+            self.close()
+            raise
+
+    def _resume(self, process_id: int) -> None:
+        import ctypes
+        from ctypes import wintypes
+
+        class ThreadEntry(ctypes.Structure):
+            _fields_ = [
+                ("dwSize", wintypes.DWORD),
+                ("cntUsage", wintypes.DWORD),
+                ("th32ThreadID", wintypes.DWORD),
+                ("th32OwnerProcessID", wintypes.DWORD),
+                ("tpBasePri", wintypes.LONG),
+                ("tpDeltaPri", wintypes.LONG),
+                ("dwFlags", wintypes.DWORD),
+            ]
+
+        kernel32 = self._kernel32
+        kernel32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+        kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+        kernel32.Thread32First.argtypes = [wintypes.HANDLE, ctypes.POINTER(ThreadEntry)]
+        kernel32.Thread32First.restype = wintypes.BOOL
+        kernel32.Thread32Next.argtypes = [wintypes.HANDLE, ctypes.POINTER(ThreadEntry)]
+        kernel32.Thread32Next.restype = wintypes.BOOL
+        kernel32.OpenThread.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel32.OpenThread.restype = wintypes.HANDLE
+        kernel32.ResumeThread.argtypes = [wintypes.HANDLE]
+        kernel32.ResumeThread.restype = wintypes.DWORD
+
+        snapshot = kernel32.CreateToolhelp32Snapshot(0x00000004, 0)  # TH32CS_SNAPTHREAD
+        if snapshot == ctypes.c_void_p(-1).value:
+            raise ctypes.WinError(ctypes.get_last_error())
+        try:
+            entry = ThreadEntry()
+            entry.dwSize = ctypes.sizeof(entry)
+            thread_ids: list[int] = []
+            found = kernel32.Thread32First(snapshot, ctypes.byref(entry))
+            while found:
+                if entry.th32OwnerProcessID == process_id:
+                    thread_ids.append(entry.th32ThreadID)
+                found = kernel32.Thread32Next(snapshot, ctypes.byref(entry))
+            if len(thread_ids) != 1:
+                raise OSError(f"expected one suspended checker thread, found {len(thread_ids)}")
+            thread = kernel32.OpenThread(0x0002, False, thread_ids[0])  # THREAD_SUSPEND_RESUME
+            if not thread:
+                raise ctypes.WinError(ctypes.get_last_error())
+            try:
+                if kernel32.ResumeThread(thread) != 1:
+                    raise OSError("could not resume suspended checker thread")
+            finally:
+                kernel32.CloseHandle(thread)
+        finally:
+            kernel32.CloseHandle(snapshot)
+
+    def terminate(self) -> None:
+        import ctypes
+
+        if not self._kernel32.TerminateJobObject(self._handle, 1):
+            raise ctypes.WinError(ctypes.get_last_error())
+
+    def release(self) -> None:
+        """Let detached children continue after an ordinary checker exit."""
+        import ctypes
+
+        self._limits.BasicLimitInformation.LimitFlags = 0
+        if not self._kernel32.SetInformationJobObject(
+            self._handle, 9, ctypes.byref(self._limits), ctypes.sizeof(self._limits)
+        ):
+            raise ctypes.WinError(ctypes.get_last_error())
+        self.close()
+
+    def close(self) -> None:
+        self._kernel32.CloseHandle(self._handle)
 
 
 def _run_command(command: list[str], root: Path) -> subprocess.CompletedProcess[str]:
+    process: subprocess.Popen[str] | None = None
+    job: _WindowsJob | None = None
+    completed_normally = False
     try:
-        return subprocess.run(
+        process = subprocess.Popen(
             command,
             cwd=root,
-            check=False,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
-            timeout=_COMMAND_TIMEOUT_SECONDS,
+            creationflags=_WINDOWS_CREATE_SUSPENDED if sys.platform == "win32" else 0,
+            start_new_session=sys.platform != "win32",
         )
-    except subprocess.TimeoutExpired:
-        rendered_command = subprocess.list2cmdline(command)
-        return subprocess.CompletedProcess(
-            command,
-            124,
-            "",
-            f"{rendered_command} timed out after {_COMMAND_TIMEOUT_SECONDS} seconds",
-        )
+        if sys.platform == "win32":
+            job = _WindowsJob(process)
+        try:
+            stdout, stderr = process.communicate(timeout=_COMMAND_TIMEOUT_SECONDS)
+        except subprocess.TimeoutExpired:
+            if sys.platform == "win32":
+                assert job is not None
+                job.terminate()
+            else:
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(process.pid, signal.SIGKILL)
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                process.communicate(timeout=_OUTPUT_DRAIN_SECONDS)
+            rendered_command = subprocess.list2cmdline(command)
+            return subprocess.CompletedProcess(
+                command,
+                124,
+                "",
+                f"{rendered_command} timed out after {_COMMAND_TIMEOUT_SECONDS} seconds",
+            )
+        if sys.platform == "win32":
+            assert job is not None
+            job.release()
+            job = None
+        completed_normally = True
+        return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
     except OSError as exc:
         return subprocess.CompletedProcess(command, 127, "", str(exc))
+    finally:
+        if job is not None:
+            job.close()
+        elif process is not None and not completed_normally:
+            if sys.platform == "win32":
+                with contextlib.suppress(OSError):
+                    process.kill()
+            else:
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(process.pid, signal.SIGKILL)
 
 
 def _tool_path(name: str, root: Path) -> str:

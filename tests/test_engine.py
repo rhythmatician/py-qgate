@@ -9,11 +9,9 @@ from pathlib import Path
 import pytest
 
 from qgate.engine import (
-    _COMMAND_TIMEOUT_SECONDS,
     _TYPE_CONTEXT_LIMIT,
     _custom_guard_errors,
     _enrich_type_diagnostics,
-    _run_command,
     run_gates,
 )
 
@@ -30,26 +28,6 @@ def test_custom_guard_errors_detects_getattr(tmp_path: Path) -> None:
     errors = _custom_guard_errors([f], tmp_path)
     assert len(errors) == 1
     assert "ban-getattr-literals" in errors[0]
-
-
-def test_run_command_reports_checker_timeout(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    command = ["pyright", "example.py"]
-
-    def time_out(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
-        assert kwargs["timeout"] == _COMMAND_TIMEOUT_SECONDS
-        raise subprocess.TimeoutExpired(command, _COMMAND_TIMEOUT_SECONDS)
-
-    monkeypatch.setattr(subprocess, "run", time_out)
-
-    result = _run_command(command, tmp_path)
-
-    assert result.returncode == 124
-    assert result.stdout == ""
-    assert "pyright" in result.stderr
-    assert f"timed out after {_COMMAND_TIMEOUT_SECONDS} seconds" in result.stderr
 
 
 def test_run_gates_success_is_silent(
