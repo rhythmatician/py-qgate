@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import tomllib
 from collections.abc import Sequence
+from os import walk
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import cast
 
@@ -24,16 +25,29 @@ def select_all_gate_targets(workspace: Path) -> list[Path]:
     trusted_workspace = workspace.resolve()
     excluded_roots = _configured_excluded_roots(trusted_workspace)
     targets: list[Path] = []
-    for candidate in trusted_workspace.rglob("*"):
-        if not candidate.is_file():
-            continue
-        if _is_excluded(candidate, trusted_workspace, excluded_roots):
-            continue
-        resolved = candidate.resolve()
-        if not _is_within_workspace(resolved, trusted_workspace):
-            continue
-        if resolved.suffix.lower() == ".py":
-            targets.append(resolved)
+    for directory, directories, filenames in walk(
+        trusted_workspace,
+        topdown=True,
+        followlinks=False,
+    ):
+        directory_path = Path(directory)
+        directories.sort()
+        directories[:] = [
+            name
+            for name in directories
+            if not _is_excluded(directory_path / name, trusted_workspace, excluded_roots)
+        ]
+        for filename in sorted(filenames):
+            candidate = directory_path / filename
+            if not candidate.is_file():
+                continue
+            if _is_excluded(candidate, trusted_workspace, excluded_roots):
+                continue
+            resolved = candidate.resolve()
+            if not _is_within_workspace(resolved, trusted_workspace):
+                continue
+            if resolved.suffix.lower() == ".py":
+                targets.append(resolved)
     return sorted(targets)
 
 
