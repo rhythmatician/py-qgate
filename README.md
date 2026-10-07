@@ -101,6 +101,18 @@ usage: qgate [command] [--codex-stdin] [--ci] [--fix]
 - `qgate --ci` checks all Gate Targets in the Workspace without modifying them.
 - `qgate --type-checker dmypy <paths...>` uses dmypy for local file checks.
 
+Each external checker has a 300-second timeout by default. A repository with a slower full-tree
+check can set a finite positive per-command limit in `pyproject.toml`:
+
+```toml
+[tool.qgate]
+command-timeout-seconds = 1200
+```
+
+The same limit applies to each Ruff or type-checker command in CI and local runs. Invalid values
+fail before any checker starts. A timed-out checker and its child processes are stopped, and qgate
+reports the timeout with any output captured before it expired.
+
 ## Excluded folders
 
 Projects can make every Python file below selected Workspace-relative folders ineligible as a

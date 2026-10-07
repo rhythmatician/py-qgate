@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from qgate.cli import _run_init, main
 
 
@@ -13,7 +15,60 @@ def test_main_no_files_returns_zero(tmp_path: Path) -> None:
     assert result == 0
 
 
-def test_main_version_reports_installed_qgate_version(capsys) -> None:
+def test_main_passes_configured_command_timeout_to_gate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "pyproject.toml").write_text("[tool.qgate]\ncommand-timeout-seconds = 1200\n")
+    (tmp_path / "example.py").write_text("x = 1\n")
+    received: dict[str, object] = {}
+
+    def run_gates(**kwargs: object) -> int:
+        received.update(kwargs)
+        return 0
+
+    monkeypatch.setattr("qgate.cli.run_gates", run_gates)
+    assert main(["example.py"], workspace_root=tmp_path) == 0
+    assert received["command_timeout_seconds"] == 1200
+
+
+def test_main_uses_default_timeout_without_project_setting(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "example.py").write_text("x = 1\n")
+    received: dict[str, object] = {}
+
+    def run_gates(**kwargs: object) -> int:
+        received.update(kwargs)
+        return 0
+
+    monkeypatch.setattr("qgate.cli.run_gates", run_gates)
+    assert main(["example.py"], workspace_root=tmp_path) == 0
+    assert received["command_timeout_seconds"] == 300
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "nan", "inf", '"300"', "true"])
+def test_main_rejects_invalid_command_timeout_before_running_gate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    value: str,
+) -> None:
+    (tmp_path / "pyproject.toml").write_text(f"[tool.qgate]\ncommand-timeout-seconds = {value}\n")
+    (tmp_path / "example.py").write_text("x = 1\n")
+
+    def run_gates(**kwargs: object) -> int:
+        pytest.fail("invalid timeout must not launch any checker")
+
+    monkeypatch.setattr("qgate.cli.run_gates", run_gates)
+    with pytest.raises(SystemExit) as exc:
+        main(["example.py"], workspace_root=tmp_path)
+    assert exc.value.code == 2
+    assert "command-timeout-seconds" in capsys.readouterr().err
+
+
+def test_main_version_reports_installed_qgate_version(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     result = main(["--version"])
 
     assert result == 0
