@@ -10,8 +10,10 @@ import shutil
 import signal
 import subprocess
 import sys
-from collections.abc import Sequence
+import tempfile
+from collections.abc import Generator, Sequence
 from pathlib import Path
+from typing import IO
 
 _GETATTR_LITERAL_PATTERN = re.compile(
     r"""getattr\(\s*[a-zA-Z_]\w*\s*,\s*(['"])(.*?)\1\s*,\s*None\s*\)""",
@@ -188,17 +190,37 @@ class _WindowsJob:
         self._kernel32.CloseHandle(self._handle)
 
 
-def _run_command(command: list[str], root: Path) -> subprocess.CompletedProcess[str]:
+@contextlib.contextmanager
+def _checker_stdin(input_data: str | None) -> Generator[IO[bytes] | None]:
+    if input_data is None:
+        yield None
+        return
+    payload = input_data.encode("utf-8")
+    with tempfile.TemporaryFile(mode="w+b") as input_file:
+        if input_file.write(payload) != len(payload):
+            raise OSError("Checker stdin target list was not fully written")
+        input_file.flush()
+        input_file.seek(0)
+        yield input_file
+
+
+def _run_command(
+    command: list[str], root: Path, *, input_data: str | None = None
+) -> subprocess.CompletedProcess[str]:
     process: subprocess.Popen[str] | None = None
     job: _WindowsJob | None = None
+    input_files = contextlib.ExitStack()
     completed_normally = False
     try:
+        input_file = input_files.enter_context(_checker_stdin(input_data))
         process = subprocess.Popen(
             command,
             cwd=root,
+            stdin=input_file,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            encoding="utf-8" if input_data is not None else None,
             creationflags=_WINDOWS_CREATE_SUSPENDED if sys.platform == "win32" else 0,
             start_new_session=sys.platform != "win32",
         )
@@ -228,7 +250,7 @@ def _run_command(command: list[str], root: Path) -> subprocess.CompletedProcess[
             job = None
         completed_normally = True
         return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
-    except OSError as exc:
+    except (OSError, UnicodeError) as exc:
         return subprocess.CompletedProcess(command, 127, "", str(exc))
     finally:
         if job is not None:
@@ -240,6 +262,7 @@ def _run_command(command: list[str], root: Path) -> subprocess.CompletedProcess[
             else:
                 with contextlib.suppress(ProcessLookupError):
                     os.killpg(process.pid, signal.SIGKILL)
+        input_files.close()
 
 
 def _tool_path(name: str, root: Path) -> str:
@@ -319,6 +342,21 @@ def _coherent_pyright_targets(files: Sequence[Path], root: Path) -> list[Path] |
     if len(subprocess.list2cmdline(command)) > _WINDOWS_SAFE_COMMAND_LENGTH:
         return None
     return compacted
+
+
+def _pyright_stdin_targets(files: Sequence[Path], root: Path) -> str | None:
+    """Encode exact root-relative paths only when Pyright's space split is lossless."""
+    workspace = root.resolve()
+    relative_paths: list[str] = []
+    for path in files:
+        try:
+            relative = path.resolve().relative_to(workspace).as_posix()
+        except (OSError, ValueError):
+            return None
+        if any(character.isspace() for character in relative):
+            return None
+        relative_paths.append(relative)
+    return "\n".join(relative_paths) + "\n"
 
 
 def _ci_command_targets(files: Sequence[Path], root: Path) -> list[Path]:
@@ -472,16 +510,21 @@ def run_gates(
         bounded=True,
     )
     type_targets = _ci_command_targets(files, root) if ci else files
+    pyright_stdin: str | None = None
     if type_checker == "pyright" and not ci:
         type_targets = _coherent_pyright_targets(files, root)
         if type_targets is None:
-            print(
-                "[QUALITY GATE FAILED]\n\n--- PYRIGHT ---\n"
-                "Selected Gate Targets exceed the Windows command-line limit, and qgate "
-                "cannot run one coherent Pyright analysis without including unselected files.",
-                file=sys.stderr,
-            )
-            return 2
+            pyright_stdin = _pyright_stdin_targets(files, root)
+            if pyright_stdin is None:
+                print(
+                    "[QUALITY GATE FAILED]\n\n--- PYRIGHT ---\n"
+                    "Selected Gate Targets exceed the Windows command-line limit, and qgate "
+                    "cannot run one coherent Pyright analysis because a selected path "
+                    "cannot be represented unambiguously on stdin.",
+                    file=sys.stderr,
+                )
+                return 2
+            type_targets = [Path("-")]
     add_commands(
         type_checker.upper(),
         tc,
@@ -490,7 +533,15 @@ def run_gates(
         bounded=not ci and type_checker != "pyright",
     )
 
-    command_results = [(label, _run_command(command, root)) for label, command in commands]
+    command_results = [
+        (
+            label,
+            _run_command(command, root, input_data=pyright_stdin)
+            if label == "PYRIGHT" and pyright_stdin is not None
+            else _run_command(command, root),
+        )
+        for label, command in commands
+    ]
     guard_errors = _custom_guard_errors(files, root)
     failures = [(label, result) for label, result in command_results if result.returncode != 0]
     if not failures and not guard_errors:

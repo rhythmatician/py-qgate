@@ -96,6 +96,9 @@ usage: qgate [command] [--codex-stdin] [--ci] [--fix]
 
 - `qgate init` scaffolds the current integration templates.
 - `qgate <paths...>` checks selected Python files.
+- Large explicit selections use one Pyright process. If exact command-line targets exceed the
+  platform limit, qgate sends whitespace-free Workspace-relative paths through Pyright's UTF-8
+  stdin target list. A path containing whitespace fails closed instead of widening the selection.
 - `qgate --codex-stdin --fix` reads one Codex PostToolUse Change Event, applies safe Ruff fixes
   and formatting, then checks the selected Gate Targets with Pyright.
 - `qgate --ci` checks all Gate Targets in the Workspace without modifying them.

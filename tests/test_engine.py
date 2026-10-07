@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import subprocess
+import sys
 from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
 
+from qgate import engine
 from qgate.engine import (
     _TYPE_CONTEXT_LIMIT,
     _custom_guard_errors,
@@ -189,14 +191,47 @@ def test_large_explicit_target_set_batches_ruff_but_keeps_one_coherent_pyright_r
     assert pyright_commands == [[pyright_commands[0][0], str(tmp_path)]]
 
 
-def test_large_partial_target_set_fails_instead_of_splitting_pyright(
+def test_large_partial_target_set_uses_one_exact_pyright_stdin_run(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
 ) -> None:
     package = tmp_path / "package"
     package.mkdir()
     sources = [package / (f"long_module_{index:04d}_" + "x" * 48 + ".py") for index in range(700)]
+    for source in sources:
+        source.touch()
+    (package / "unselected.py").touch()
+    calls: list[tuple[list[str], str | None]] = []
+
+    def run_command(
+        command: list[str], root: Path, *, input_data: str | None = None
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append((command, input_data))
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr("qgate.engine._run_command", run_command)
+
+    assert run_gates(files=sources, root=tmp_path, fix=True) == 0
+    pyright_calls = [call for call in calls if "pyright" in call[0][0]]
+    assert len(pyright_calls) == 1
+    command, input_data = pyright_calls[0]
+    assert command == [command[0], "-"]
+    assert input_data is not None
+    assert input_data.splitlines() == [
+        source.relative_to(tmp_path).as_posix() for source in sources
+    ]
+    assert "package/unselected.py" not in input_data
+    assert all(data is None for command, data in calls if "pyright" not in command[0])
+
+
+def test_large_partial_target_set_with_whitespace_still_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    package = tmp_path / "package with spaces"
+    package.mkdir()
+    sources = [package / (f"module_{index:04d}_" + "x" * 60 + ".py") for index in range(400)]
     for source in sources:
         source.touch()
     (package / "unselected.py").touch()
@@ -206,11 +241,52 @@ def test_large_partial_target_set_fails_instead_of_splitting_pyright(
         commands.append(command)
         return subprocess.CompletedProcess(command, 0, "", "")
 
-    monkeypatch.setattr("qgate.engine._run_command", run_command)
+    monkeypatch.setattr(engine, "_run_command", run_command)
 
     assert run_gates(files=sources, root=tmp_path, fix=True) == 2
     assert not [command for command in commands if "pyright" in command[0]]
-    assert "cannot run one coherent Pyright analysis" in capsys.readouterr().err
+    assert "cannot be represented unambiguously on stdin" in capsys.readouterr().err
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows command-length and Pyright proof")
+def test_real_pyright_stdin_preserves_config_and_exact_large_selection(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    package = tmp_path / "package"
+    package.mkdir()
+    vendor = tmp_path / "vendor"
+    vendor.mkdir()
+    (vendor / "helper.py").write_text("answer: int = 42\n", encoding="utf-8")
+    (tmp_path / "pyrightconfig.json").write_text(
+        '{"include":["package"],"exclude":["package/excluded.py"],'
+        '"extraPaths":["vendor"],"typeCheckingMode":"strict"}\n',
+        encoding="utf-8",
+    )
+    entry = package / "entry.py"
+    entry.write_text(
+        "from helper import answer\n\ndef mystery(value):\n    return answer + value\n",
+        encoding="utf-8",
+    )
+    unselected = package / "unselected.py"
+    unselected.write_text("def unselected(value):\n    return value\n", encoding="utf-8")
+    excluded = package / "excluded.py"
+    excluded.write_text("def excluded(value):\n    return value\n", encoding="utf-8")
+    unicode_source = package / "résumé.py"
+    unicode_source.write_text("value: int = 1\n", encoding="utf-8")
+    sources = [entry, unicode_source]
+    sources.extend(
+        package / (f"long_module_{index:04d}_" + "x" * 65 + ".py") for index in range(250)
+    )
+    for source in sources[2:]:
+        source.write_text("value: int = 1\n", encoding="utf-8")
+    assert len(subprocess.list2cmdline(["pyright", *(str(path) for path in sources)])) > 16_000
+    assert run_gates(files=sources, root=tmp_path) == 2
+    diagnostics = capsys.readouterr().err
+    assert "reportUnknownParameterType" in diagnostics, diagnostics[-3000:]
+    assert "reportMissingImports" not in diagnostics
+    assert "unselected.py:" not in diagnostics
+    assert "excluded.py:" not in diagnostics
 
 
 def test_dmypy_respects_project_owned_mypy_configuration(
