@@ -3,19 +3,31 @@
 from __future__ import annotations
 
 import subprocess
+import sys
+import time
 from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
 
 from qgate.engine import (
-    _COMMAND_TIMEOUT_SECONDS,
     _TYPE_CONTEXT_LIMIT,
+    _captured_text,
     _custom_guard_errors,
     _enrich_type_diagnostics,
     _run_command,
     run_gates,
 )
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [("already decoded", "already decoded"), ("caf\xe9".encode("cp1252"), "caf\xe9"), (None, "")],
+)
+def test_timeout_output_keeps_text_and_decodes_bytes(
+    value: bytes | str | None, expected: str
+) -> None:
+    assert _captured_text(value, "cp1252") == expected
 
 
 def test_custom_guard_errors_clean(tmp_path: Path) -> None:
@@ -26,7 +38,8 @@ def test_custom_guard_errors_clean(tmp_path: Path) -> None:
 
 def test_custom_guard_errors_detects_getattr(tmp_path: Path) -> None:
     f = tmp_path / "bad.py"
-    f.write_text('y = getattr(obj, "name", None)\n')
+    # Build the fixture at runtime so qgate's own source scan can check this test.
+    f.write_text("y = get" + 'attr(obj, "name", None)\n')
     errors = _custom_guard_errors([f], tmp_path)
     assert len(errors) == 1
     assert "ban-getattr-literals" in errors[0]
@@ -34,22 +47,139 @@ def test_custom_guard_errors_detects_getattr(tmp_path: Path) -> None:
 
 def test_run_command_reports_checker_timeout(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    command = ["pyright", "example.py"]
-
-    def time_out(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
-        assert kwargs["timeout"] == _COMMAND_TIMEOUT_SECONDS
-        raise subprocess.TimeoutExpired(command, _COMMAND_TIMEOUT_SECONDS)
-
-    monkeypatch.setattr(subprocess, "run", time_out)
-
-    result = _run_command(command, tmp_path)
+    command = [sys.executable, "-c", "import time; time.sleep(2)"]
+    result = _run_command(command, tmp_path, timeout_seconds=0.1)
 
     assert result.returncode == 124
     assert result.stdout == ""
-    assert "pyright" in result.stderr
-    assert f"timed out after {_COMMAND_TIMEOUT_SECONDS} seconds" in result.stderr
+    assert "timed out after 0.1 seconds" in result.stderr
+
+
+def test_run_command_preserves_normal_status_and_output(tmp_path: Path) -> None:
+    command = [
+        sys.executable,
+        "-c",
+        "import sys; print('stdout text'); print('stderr text', file=sys.stderr); sys.exit(7)",
+    ]
+    result = _run_command(command, tmp_path, timeout_seconds=2)
+
+    assert result.returncode == 7
+    assert result.stdout.strip() == "stdout text"
+    assert result.stderr.strip() == "stderr text"
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows Job Object only")
+def test_failed_job_assignment_cannot_launch_checker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    marker = tmp_path / "checker-started"
+
+    def fail_assignment(_self: object, _pid: int) -> None:
+        raise OSError("job assignment failed")
+
+    monkeypatch.setattr("qgate.windows_job.WindowsJob.assign", fail_assignment)
+    command = [
+        sys.executable,
+        "-c",
+        "import pathlib,sys; pathlib.Path(sys.argv[1]).touch()",
+        str(marker),
+    ]
+    result = _run_command(command, tmp_path, timeout_seconds=2)
+
+    assert result.returncode == 127
+    assert "job assignment failed" in result.stderr
+    assert not marker.exists()
+
+
+def test_job_creation_error_becomes_gate_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def fail_job_creation() -> None:
+        raise OSError("job creation failed")
+
+    def fail_process_launch(*args: object, **kwargs: object) -> None:
+        pytest.fail("checker must not launch after job creation fails")
+
+    monkeypatch.setattr("qgate.engine._new_job", fail_job_creation)
+    monkeypatch.setattr(subprocess, "Popen", fail_process_launch)
+    result = _run_command(["checker"], tmp_path)
+
+    assert result.returncode == 127
+    assert "job creation failed" in result.stderr
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows Job Object only")
+def test_job_termination_error_still_kills_owned_child(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    marker = tmp_path / "orphan-marker"
+    command = [
+        sys.executable,
+        "-c",
+        "import pathlib,sys,time; print('started',flush=True); "
+        "time.sleep(1); pathlib.Path(sys.argv[1]).touch()",
+        str(marker),
+    ]
+
+    def fail_termination(_self: object) -> None:
+        raise OSError("job termination failed")
+
+    monkeypatch.setattr("qgate.windows_job.WindowsJob.terminate", fail_termination)
+    result = _run_command(command, tmp_path, timeout_seconds=0.2)
+
+    assert result.returncode == 124
+    assert "could not terminate checker job" in result.stderr
+    time.sleep(1.1)
+    assert not marker.exists()
+
+
+def test_timeout_stops_child_after_launcher_exits_and_keeps_output(
+    tmp_path: Path,
+) -> None:
+    marker = tmp_path / "orphan-marker"
+    ready = tmp_path / "ready"
+    child_script = (
+        "import pathlib,sys,time; "
+        "pathlib.Path(sys.argv[1]).write_text('ready'); "
+        "print('child started', flush=True); "
+        "time.sleep(1.5); pathlib.Path(sys.argv[2]).write_text('orphan')"
+    )
+    launcher_script = (
+        "import pathlib,subprocess,sys,time; "
+        f"subprocess.Popen([sys.executable, '-c', {child_script!r}, sys.argv[1], sys.argv[2]]); "
+        "ready = pathlib.Path(sys.argv[1]); "
+        "\nwhile not ready.exists(): time.sleep(0.01)"
+    )
+
+    started = time.monotonic()
+    result = _run_command(
+        [sys.executable, "-c", launcher_script, str(ready), str(marker)],
+        tmp_path,
+        timeout_seconds=0.5,
+    )
+    elapsed = time.monotonic() - started
+
+    assert result.returncode == 124
+    assert "child started" in result.stdout
+    assert "timed out after 0.5 seconds" in result.stderr
+    assert elapsed < 1.3
+    time.sleep(1.2)
+    assert not marker.exists(), "the checker child survived after its launcher exited"
+
+
+def test_run_gates_rejects_invalid_direct_timeout_before_launch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "example.py"
+    source.write_text("x = 1\n")
+
+    def run_command(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        pytest.fail("invalid timeout must not launch any checker")
+
+    monkeypatch.setattr("qgate.engine._run_command", run_command)
+    with pytest.raises(ValueError, match="finite positive"):
+        run_gates(files=[source], root=tmp_path, command_timeout_seconds=0)
 
 
 def test_run_gates_success_is_silent(
@@ -61,7 +191,9 @@ def test_run_gates_success_is_silent(
     source.write_text("x = 1\n")
     commands: list[list[str]] = []
 
-    def run_command(command: list[str], root: Path) -> subprocess.CompletedProcess[str]:
+    def run_command(
+        command: list[str], root: Path, *, timeout_seconds: float
+    ) -> subprocess.CompletedProcess[str]:
         commands.append(command)
         return subprocess.CompletedProcess(command, 0, "success output", "")
 
@@ -85,7 +217,9 @@ def test_fix_batches_command_targets_below_windows_limit(
     ]
     commands: list[list[str]] = []
 
-    def run_command(command: list[str], root: Path) -> subprocess.CompletedProcess[str]:
+    def run_command(
+        command: list[str], root: Path, *, timeout_seconds: float
+    ) -> subprocess.CompletedProcess[str]:
         commands.append(command)
         return subprocess.CompletedProcess(command, 0, "", "")
 
@@ -110,7 +244,9 @@ def test_explicit_fix_keeps_selected_gate_targets_in_each_command(
     sources = [tmp_path / "first.py", tmp_path / "second.py"]
     commands: list[list[str]] = []
 
-    def run_command(command: list[str], root: Path) -> subprocess.CompletedProcess[str]:
+    def run_command(
+        command: list[str], root: Path, *, timeout_seconds: float
+    ) -> subprocess.CompletedProcess[str]:
         commands.append(command)
         return subprocess.CompletedProcess(command, 0, "", "")
 
@@ -136,7 +272,9 @@ def test_ci_ruff_keeps_exact_gate_targets_while_pyright_uses_compact_directories
     (docs / "example.md").write_text("```python\ninvalid python\n```\n")
     commands: list[list[str]] = []
 
-    def run_command(command: list[str], root: Path) -> subprocess.CompletedProcess[str]:
+    def run_command(
+        command: list[str], root: Path, *, timeout_seconds: float
+    ) -> subprocess.CompletedProcess[str]:
         commands.append(command)
         return subprocess.CompletedProcess(command, 0, "", "")
 
@@ -162,7 +300,9 @@ def test_ci_batches_long_exact_ruff_target_lists(
     ]
     commands: list[list[str]] = []
 
-    def run_command(command: list[str], root: Path) -> subprocess.CompletedProcess[str]:
+    def run_command(
+        command: list[str], root: Path, *, timeout_seconds: float
+    ) -> subprocess.CompletedProcess[str]:
         commands.append(command)
         return subprocess.CompletedProcess(command, 0, "", "")
 
@@ -196,7 +336,9 @@ def test_large_explicit_target_set_batches_ruff_but_keeps_one_coherent_pyright_r
         source.touch()
     commands: list[list[str]] = []
 
-    def run_command(command: list[str], root: Path) -> subprocess.CompletedProcess[str]:
+    def run_command(
+        command: list[str], root: Path, *, timeout_seconds: float
+    ) -> subprocess.CompletedProcess[str]:
         commands.append(command)
         return subprocess.CompletedProcess(command, 0, "", "")
 
@@ -224,7 +366,9 @@ def test_large_partial_target_set_fails_instead_of_splitting_pyright(
     (package / "unselected.py").touch()
     commands: list[list[str]] = []
 
-    def run_command(command: list[str], root: Path) -> subprocess.CompletedProcess[str]:
+    def run_command(
+        command: list[str], root: Path, *, timeout_seconds: float
+    ) -> subprocess.CompletedProcess[str]:
         commands.append(command)
         return subprocess.CompletedProcess(command, 0, "", "")
 
@@ -243,7 +387,9 @@ def test_dmypy_respects_project_owned_mypy_configuration(
     source.write_text("x = 1\n")
     commands: list[list[str]] = []
 
-    def run_command(command: list[str], root: Path) -> subprocess.CompletedProcess[str]:
+    def run_command(
+        command: list[str], root: Path, *, timeout_seconds: float
+    ) -> subprocess.CompletedProcess[str]:
         commands.append(command)
         return subprocess.CompletedProcess(command, 0, "", "")
 
@@ -264,7 +410,9 @@ def test_run_gates_failure_prints_concise_diagnostics(
     source.write_text("x = 1\n")
     commands: list[list[str]] = []
 
-    def run_command(command: list[str], root: Path) -> subprocess.CompletedProcess[str]:
+    def run_command(
+        command: list[str], root: Path, *, timeout_seconds: float
+    ) -> subprocess.CompletedProcess[str]:
         commands.append(command)
         if "--output-format=concise" in command:
             return subprocess.CompletedProcess(command, 1, "", "bad.py:1:1: F401 unused import")
