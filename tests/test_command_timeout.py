@@ -68,7 +68,7 @@ def test_timeout_reaps_descendant_holding_output_pipe(
             assert port_file.exists()
             ready_at = time.monotonic()
         return original_communicate(
-            process, input=input, timeout=timeout if process.args == checker_command else None
+            process, input=input, timeout=timeout if process.args == checker_command else 8
         )
 
     monkeypatch.setattr(subprocess.Popen, "communicate", communicate_after_child_starts)
