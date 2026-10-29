@@ -6,17 +6,43 @@ import argparse
 import json
 import re
 import sys
+import tomllib
 from collections.abc import Sequence
 from importlib.metadata import version
 from pathlib import Path
-from typing import TextIO
+from typing import TextIO, cast
 
 from qgate.codex import select_codex_gate_targets
-from qgate.engine import run_gates
+from qgate.engine import DEFAULT_COMMAND_TIMEOUT_SECONDS, run_gates, validate_command_timeout
 from qgate.targeting import select_all_gate_targets, select_gate_targets
 
 _TEMPLATES_DIR = Path(__file__).parent / "templates"
 _VSCODE_SETTINGS = "editor.formatOnSave"
+__all__ = ["_run_init", "main"]
+
+
+def _configured_command_timeout_seconds(root: Path) -> float:
+    pyproject = root / "pyproject.toml"
+    try:
+        configuration = cast(
+            dict[str, object], tomllib.loads(pyproject.read_text(encoding="utf-8"))
+        )
+    except FileNotFoundError:
+        return DEFAULT_COMMAND_TIMEOUT_SECONDS
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        raise ValueError(f"cannot read {pyproject}: {exc}") from exc
+
+    raw_tool = configuration.get("tool")
+    if not isinstance(raw_tool, dict):
+        return DEFAULT_COMMAND_TIMEOUT_SECONDS
+    tool = cast(dict[str, object], raw_tool)
+    raw_qgate = tool.get("qgate")
+    if not isinstance(raw_qgate, dict):
+        return DEFAULT_COMMAND_TIMEOUT_SECONDS
+    qgate = cast(dict[str, object], raw_qgate)
+    return validate_command_timeout(
+        qgate.get("command-timeout-seconds", DEFAULT_COMMAND_TIMEOUT_SECONDS)
+    )
 
 
 def _without_jsonc_comments(text: str) -> str:
@@ -311,6 +337,10 @@ def main(
         parser.error("dmypy is only available for local file checks")
 
     root = (workspace_root or Path.cwd()).resolve()
+    try:
+        command_timeout_seconds = _configured_command_timeout_seconds(root)
+    except ValueError as exc:
+        parser.error(str(exc))
 
     if args.ci:
         files = select_all_gate_targets(root)
@@ -331,6 +361,7 @@ def main(
         ci=args.ci,
         fix=args.fix,
         type_checker=args.type_checker,
+        command_timeout_seconds=command_timeout_seconds,
     )
 
 

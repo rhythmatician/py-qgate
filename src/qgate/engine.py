@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import ast
 import json
+import locale
+import math
 import os
 import re
 import shutil
@@ -14,6 +16,8 @@ import tomllib
 from collections.abc import Generator, Sequence
 from contextlib import contextmanager
 from pathlib import Path
+
+from qgate.windows_job import WindowsJob
 
 _GETATTR_LITERAL_PATTERN = re.compile(
     r"""getattr\(\s*[a-zA-Z_]\w*\s*,\s*(['"])(.*?)\1\s*,\s*None\s*\)""",
@@ -27,38 +31,124 @@ _TYPE_DIAGNOSTIC_PATTERN = re.compile(
 _TYPE_CONTEXT_LIMIT = 1200
 _TYPE_CONTEXT_ITEM_LIMIT = 300
 _WINDOWS_SAFE_COMMAND_LENGTH = 16_000
-_COMMAND_TIMEOUT_SECONDS = 300
+DEFAULT_COMMAND_TIMEOUT_SECONDS = 300
+_COMMAND_TIMEOUT_SECONDS = DEFAULT_COMMAND_TIMEOUT_SECONDS
 __all__ = [
-    "_COMMAND_TIMEOUT_SECONDS",
     "_TYPE_CONTEXT_LIMIT",
+    "_captured_text",
     "_custom_guard_errors",
     "_enrich_type_diagnostics",
     "_pyright_selection_config",
     "_run_command",
     "run_gates",
+    "validate_command_timeout",
 ]
 
 
-def _run_command(command: list[str], root: Path) -> subprocess.CompletedProcess[str]:
+def validate_command_timeout(value: object) -> float:
+    message = "[tool.qgate] command-timeout-seconds must be a finite positive number"
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(message)
     try:
-        return subprocess.run(
-            command,
+        timeout = float(value)
+    except OverflowError as exc:
+        raise ValueError(message) from exc
+    if not math.isfinite(timeout) or timeout <= 0:
+        raise ValueError(message)
+    return timeout
+
+
+def _new_job() -> WindowsJob | None:
+    return WindowsJob() if sys.platform == "win32" else None
+
+
+def _stop_process_tree(process: subprocess.Popen[str], job: WindowsJob | None) -> str:
+    """Stop the checker and descendants owned by this gate invocation."""
+    error = ""
+    if job is not None:
+        try:
+            job.terminate()
+        except OSError as exc:
+            error = f"could not terminate checker job: {exc}"
+            job.close()  # KILL_ON_JOB_CLOSE is the fallback for this owned tree.
+    else:
+        # On POSIX, a negative PID targets the session's process group.
+        try:
+            os.kill(-process.pid, 9)  # SIGKILL
+        except ProcessLookupError:
+            pass
+        except OSError as exc:
+            error = f"could not terminate checker group: {exc}"
+    if process.poll() is None:
+        process.kill()
+    return error
+
+
+def _captured_text(value: bytes | str | None, encoding: str) -> str:
+    if isinstance(value, bytes):
+        return value.decode(encoding, errors="replace")
+    return value or ""
+
+
+def _run_command(
+    command: list[str],
+    root: Path,
+    *,
+    timeout_seconds: float = DEFAULT_COMMAND_TIMEOUT_SECONDS,
+) -> subprocess.CompletedProcess[str]:
+    timeout_seconds = validate_command_timeout(timeout_seconds)
+    output_encoding = locale.getpreferredencoding(False)
+    job: WindowsJob | None = None
+    try:
+        job = _new_job()
+        launch_command = [sys.executable, "-m", "qgate._launcher", *command] if job else command
+        process = subprocess.Popen(
+            launch_command,
             cwd=root,
-            check=False,
-            capture_output=True,
+            stdin=subprocess.PIPE if job else None,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
-            timeout=_COMMAND_TIMEOUT_SECONDS,
+            encoding=output_encoding,
+            start_new_session=sys.platform != "win32",
         )
-    except subprocess.TimeoutExpired:
-        rendered_command = subprocess.list2cmdline(command)
-        return subprocess.CompletedProcess(
-            command,
-            124,
-            "",
-            f"{rendered_command} timed out after {_COMMAND_TIMEOUT_SECONDS} seconds",
-        )
+        try:
+            if job is not None:
+                job.assign(process.pid)
+        except OSError:
+            process.kill()
+            process.communicate(timeout=5)
+            raise
+
+        try:
+            stdout, stderr = process.communicate(
+                input="1" if job is not None else None, timeout=timeout_seconds
+            )
+            return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+        except subprocess.TimeoutExpired:
+            termination_error = _stop_process_tree(process, job)
+            try:
+                stdout, stderr = process.communicate(timeout=5)
+            except subprocess.TimeoutExpired as exc:
+                stdout = _captured_text(exc.stdout, output_encoding)
+                stderr = _captured_text(exc.stderr, output_encoding)
+                if process.stdout is not None:
+                    process.stdout.close()
+                if process.stderr is not None:
+                    process.stderr.close()
+                if process.poll() is None:
+                    process.kill()
+                stderr += "\nchecker output could not be drained after termination"
+            if termination_error:
+                stderr += f"\n{termination_error}"
+            rendered_command = subprocess.list2cmdline(command)
+            stderr += f"\n{rendered_command} timed out after {timeout_seconds:g} seconds"
+            return subprocess.CompletedProcess(command, 124, stdout, stderr)
     except OSError as exc:
         return subprocess.CompletedProcess(command, 127, "", str(exc))
+    finally:
+        if job is not None:
+            job.close()
 
 
 def _tool_path(name: str, root: Path) -> str:
@@ -280,8 +370,10 @@ def run_gates(
     ci: bool = False,
     fix: bool = False,
     type_checker: str = "pyright",
+    command_timeout_seconds: float = DEFAULT_COMMAND_TIMEOUT_SECONDS,
 ) -> int:
     """Run quality gates on the given files and return an exit code."""
+    command_timeout_seconds = validate_command_timeout(command_timeout_seconds)
     if not files:
         return 0
 
@@ -347,14 +439,23 @@ def run_gates(
             try:
                 with _pyright_selection_config(files, root) as config_path:
                     command_results.append(
-                        (label, _run_command([*command, "--project", str(config_path)], root))
+                        (
+                            label,
+                            _run_command(
+                                [*command, "--project", str(config_path)],
+                                root,
+                                timeout_seconds=command_timeout_seconds,
+                            ),
+                        )
                     )
             except (OSError, ValueError, tomllib.TOMLDecodeError) as exc:
                 command_results.append(
                     (label, subprocess.CompletedProcess(command, 2, "", str(exc)))
                 )
         else:
-            command_results.append((label, _run_command(command, root)))
+            command_results.append(
+                (label, _run_command(command, root, timeout_seconds=command_timeout_seconds))
+            )
     guard_errors = _custom_guard_errors(files, root)
     failures = [(label, result) for label, result in command_results if result.returncode != 0]
     if not failures and not guard_errors:
