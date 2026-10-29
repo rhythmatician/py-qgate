@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shutil
 import subprocess
 from collections.abc import Sequence
 from pathlib import Path
@@ -211,7 +212,7 @@ def test_large_explicit_target_set_batches_ruff_but_keeps_one_coherent_pyright_r
     assert pyright_commands == [[pyright_commands[0][0], str(tmp_path)]]
 
 
-def test_large_partial_target_set_fails_instead_of_splitting_pyright(
+def test_large_partial_target_set_runs_one_pyright_with_exact_selection(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -226,13 +227,204 @@ def test_large_partial_target_set_fails_instead_of_splitting_pyright(
 
     def run_command(command: list[str], root: Path) -> subprocess.CompletedProcess[str]:
         commands.append(command)
+        if "pyright" in command[0]:
+            import json
+
+            config = json.loads(Path(command[-1]).read_text(encoding="utf-8"))
+            assert set(config["include"]) == {p.relative_to(tmp_path).as_posix() for p in sources}
         return subprocess.CompletedProcess(command, 0, "", "")
 
     monkeypatch.setattr("qgate.engine._run_command", run_command)
 
-    assert run_gates(files=sources, root=tmp_path, fix=True) == 2
-    assert not [command for command in commands if "pyright" in command[0]]
-    assert "cannot run one coherent Pyright analysis" in capsys.readouterr().err
+    assert run_gates(files=sources, root=tmp_path, fix=True) == 0
+    pyright_commands = [command for command in commands if "pyright" in command[0]]
+    assert len(pyright_commands) == 1
+    assert pyright_commands[0][-2] == "--project"
+    assert not Path(pyright_commands[0][-1]).exists()
+
+
+def test_long_partial_selection_real_pyright_preserves_config_and_spaces(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr("qgate.engine._WINDOWS_SAFE_COMMAND_LENGTH", 100)
+    (tmp_path / "pyproject.toml").write_text(
+        "[tool.pyright]\nreportAssignmentType = false\n", encoding="utf-8"
+    )
+    package = tmp_path / "space é"
+    package.mkdir()
+    selected = package / "selected.py"
+    selected.write_text("value: int = None\n", encoding="utf-8")
+    (package / "unselected.py").write_text("value: int = None\n", encoding="utf-8")
+
+    assert run_gates(files=[selected], root=tmp_path) == 0
+    (tmp_path / "pyproject.toml").write_text(
+        "[tool.pyright]\nreportAssignmentType = true\n", encoding="utf-8"
+    )
+    assert run_gates(files=[selected], root=tmp_path) == 2
+    errors = capsys.readouterr().err
+    assert "reportAssignmentType" in errors
+    assert "unselected.py" not in errors
+    assert not list(tmp_path.glob(".qgate-pyright-*.json"))
+
+
+def test_long_selection_honors_json_precedence_and_execution_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr("qgate.engine._WINDOWS_SAFE_COMMAND_LENGTH", 100)
+    (tmp_path / "pyproject.toml").write_text(
+        "[tool.pyright]\nreportAssignmentType = false\n", encoding="utf-8"
+    )
+    (tmp_path / "pyrightconfig.json").write_text(
+        '{"reportAssignmentType": true, '
+        '"executionEnvironments": [{"root": "app", "extraPaths": ["lib"]}]}',
+        encoding="utf-8",
+    )
+    app = tmp_path / "app"
+    app.mkdir()
+    lib = tmp_path / "lib"
+    lib.mkdir()
+    (lib / "helper.py").write_text("def number() -> int:\n    return 1\n", encoding="utf-8")
+    source = app / "selected.py"
+    source.write_text("from helper import number\n\nvalue: str = number()\n", encoding="utf-8")
+    (app / "unselected.py").write_text("value: int = None\n", encoding="utf-8")
+
+    assert run_gates(files=[source], root=tmp_path) == 2
+    errors = capsys.readouterr().err
+    assert "reportAssignmentType" in errors
+    assert "reportMissingImports" not in errors
+    assert "unselected.py" not in errors
+    assert not list(tmp_path.glob(".qgate-pyright-*.json"))
+
+
+def test_long_selection_nested_config_matches_explicit_pyright(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from qgate.engine import _run_command
+
+    monkeypatch.setattr("qgate.engine._WINDOWS_SAFE_COMMAND_LENGTH", 100)
+    settings = tmp_path / "settings"
+    settings.mkdir()
+    lib = tmp_path / "lib"
+    lib.mkdir()
+    (lib / "helper.py").write_text("def number() -> int:\n    return 1\n", encoding="utf-8")
+    (settings / "base.json").write_text(
+        '{"extraPaths": ["../lib"], "reportAssignmentType": true}', encoding="utf-8"
+    )
+    (tmp_path / "pyrightconfig.json").write_text(
+        '{"extends": "settings/base.json"}', encoding="utf-8"
+    )
+    source = tmp_path / "selected.py"
+    source.write_text("from helper import number\nvalue: str = number()\n", encoding="utf-8")
+    (tmp_path / "unselected.py").write_text("value: int = None\n", encoding="utf-8")
+    pyright = shutil.which("pyright")
+    assert pyright is not None
+    baseline = _run_command([pyright, str(source)], tmp_path)
+    calls: list[list[str]] = []
+
+    def record_command(command: list[str], root: Path) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        return _run_command(command, root)
+
+    monkeypatch.setattr("qgate.engine._run_command", record_command)
+    assert baseline.returncode == 1
+    assert "reportAssignmentType" in baseline.stdout
+    assert "reportMissingImports" not in baseline.stdout
+    assert run_gates(files=[source], root=tmp_path) == 2
+    errors = capsys.readouterr().err
+    assert "reportAssignmentType" in errors
+    assert "reportMissingImports" not in errors
+    assert "unselected.py" not in errors
+    assert len([command for command in calls if "pyright" in command[0]]) == 1
+    assert not list(tmp_path.glob(".qgate-pyright-*.json"))
+
+
+def test_long_selection_without_project_config_handles_literal_brackets(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr("qgate.engine._WINDOWS_SAFE_COMMAND_LENGTH", 100)
+    source = tmp_path / "selected[1].py"
+    source.write_text("value: int = None\n", encoding="utf-8")
+    (tmp_path / "selected1.py").write_text("value: int = None\n", encoding="utf-8")
+    assert run_gates(files=[source], root=tmp_path) == 2
+    errors = capsys.readouterr().err
+    assert "reportAssignmentType" in errors
+    assert "selected1.py" not in errors
+    assert not list(tmp_path.glob(".qgate-pyright-*.json"))
+
+
+def test_long_selection_preserves_project_excludes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from qgate.engine import _run_command
+
+    monkeypatch.setattr("qgate.engine._WINDOWS_SAFE_COMMAND_LENGTH", 100)
+    (tmp_path / "pyrightconfig.json").write_text('{"exclude": ["selected.py"]}', encoding="utf-8")
+    source = tmp_path / "selected.py"
+    source.write_text("value: int = None\n", encoding="utf-8")
+    (tmp_path / "unselected.py").write_text("value: int = None\n", encoding="utf-8")
+    pyright = shutil.which("pyright")
+    assert pyright is not None
+    baseline = _run_command([pyright, str(source)], tmp_path)
+    assert baseline.returncode == 0
+    assert run_gates(files=[source], root=tmp_path) == 0
+    assert not capsys.readouterr().err
+    assert not list(tmp_path.glob(".qgate-pyright-*.json"))
+
+
+def test_long_selection_without_project_config_runs_pyright(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr("qgate.engine._WINDOWS_SAFE_COMMAND_LENGTH", 100)
+    source = tmp_path / "selected.py"
+    source.write_text("value: int = None\n", encoding="utf-8")
+    (tmp_path / "unselected.py").write_text("value: int = None\n", encoding="utf-8")
+    assert run_gates(files=[source], root=tmp_path) == 2
+    errors = capsys.readouterr().err
+    assert "reportAssignmentType" in errors
+    assert "unselected.py" not in errors
+
+
+def test_selection_configs_are_unique_and_clean_up_after_exception(tmp_path: Path) -> None:
+    from qgate.engine import _pyright_selection_config
+
+    source = tmp_path / "selected.py"
+    source.touch()
+    with (
+        pytest.raises(RuntimeError, match="checker failure"),
+        _pyright_selection_config([source], tmp_path) as first,
+        _pyright_selection_config([source], tmp_path) as second,
+    ):
+        assert first != second
+        assert first.exists() and second.exists()
+        raise RuntimeError("checker failure")
+    assert not list(tmp_path.glob(".qgate-pyright-*.json"))
+
+
+def test_ancestor_project_discovery_matches_explicit_pyright(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from qgate.engine import _run_command
+
+    monkeypatch.setattr("qgate.engine._WINDOWS_SAFE_COMMAND_LENGTH", 100)
+    (tmp_path / "pyrightconfig.json").write_text(
+        '{"reportAssignmentType": false}', encoding="utf-8"
+    )
+    (tmp_path / "helper.py").write_text("def number() -> int:\n    return 1\n", encoding="utf-8")
+    child = tmp_path / "child"
+    child.mkdir()
+    (child / "pyproject.toml").write_text(
+        "[tool.pyright]\nreportAssignmentType = true\n", encoding="utf-8"
+    )
+    source = child / "selected.py"
+    source.write_text("from helper import number\n\nvalue: str = number()\n", encoding="utf-8")
+    (child / "unselected.py").write_text("value: int = None\n", encoding="utf-8")
+    pyright = shutil.which("pyright")
+    assert pyright is not None
+    baseline = _run_command([pyright, str(source)], child)
+    assert baseline.returncode == 0
+    assert run_gates(files=[source], root=child) == 0
+    assert not capsys.readouterr().err
+    assert not list(tmp_path.glob(".qgate-pyright-*.json"))
 
 
 def test_dmypy_respects_project_owned_mypy_configuration(

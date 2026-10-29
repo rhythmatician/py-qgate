@@ -3,11 +3,16 @@
 from __future__ import annotations
 
 import ast
+import json
+import os
 import re
 import shutil
 import subprocess
 import sys
-from collections.abc import Sequence
+import tempfile
+import tomllib
+from collections.abc import Generator, Sequence
+from contextlib import contextmanager
 from pathlib import Path
 
 _GETATTR_LITERAL_PATTERN = re.compile(
@@ -23,6 +28,15 @@ _TYPE_CONTEXT_LIMIT = 1200
 _TYPE_CONTEXT_ITEM_LIMIT = 300
 _WINDOWS_SAFE_COMMAND_LENGTH = 16_000
 _COMMAND_TIMEOUT_SECONDS = 300
+__all__ = [
+    "_COMMAND_TIMEOUT_SECONDS",
+    "_TYPE_CONTEXT_LIMIT",
+    "_custom_guard_errors",
+    "_enrich_type_diagnostics",
+    "_pyright_selection_config",
+    "_run_command",
+    "run_gates",
+]
 
 
 def _run_command(command: list[str], root: Path) -> subprocess.CompletedProcess[str]:
@@ -124,6 +138,42 @@ def _coherent_pyright_targets(files: Sequence[Path], root: Path) -> list[Path] |
     if len(subprocess.list2cmdline(command)) > _WINDOWS_SAFE_COMMAND_LENGTH:
         return None
     return compacted
+
+
+@contextmanager
+def _pyright_selection_config(files: Sequence[Path], root: Path) -> Generator[Path]:
+    """Preserve Pyright's discovered project root and policy for exact targets."""
+    directories = (root, *root.parents)
+    base = root
+    inherited: Path | None = None
+    for directory in directories:
+        candidate = directory / "pyrightconfig.json"
+        if candidate.is_file():
+            base, inherited = directory, candidate
+            break
+    if inherited is None:
+        for directory in directories:
+            candidate = directory / "pyproject.toml"
+            if candidate.is_file():
+                with candidate.open("rb") as source:
+                    project = tomllib.load(source)
+                if "pyright" in project.get("tool", {}):
+                    base, inherited = directory, candidate
+                    break
+    relative = [path.relative_to(base).as_posix() for path in files]
+    if any(any(char in path for char in "*?") for path in relative):
+        raise ValueError("Pyright include patterns cannot safely represent selected paths")
+    config: dict[str, object] = {"include": relative}
+    if inherited is not None:
+        config["extends"] = inherited.name
+    descriptor, name = tempfile.mkstemp(suffix=".json", prefix=".qgate-pyright-", dir=base)
+    os.close(descriptor)
+    config_path = Path(name)
+    try:
+        config_path.write_text(json.dumps(config, ensure_ascii=True), encoding="utf-8")
+        yield config_path
+    finally:
+        config_path.unlink(missing_ok=True)
 
 
 def _ci_command_targets(files: Sequence[Path], root: Path) -> list[Path]:
@@ -277,16 +327,12 @@ def run_gates(
         bounded=True,
     )
     type_targets = _ci_command_targets(files, root) if ci else files
+    use_selection_config = False
     if type_checker == "pyright" and not ci:
         type_targets = _coherent_pyright_targets(files, root)
         if type_targets is None:
-            print(
-                "[QUALITY GATE FAILED]\n\n--- PYRIGHT ---\n"
-                "Selected Gate Targets exceed the Windows command-line limit, and qgate "
-                "cannot run one coherent Pyright analysis without including unselected files.",
-                file=sys.stderr,
-            )
-            return 2
+            use_selection_config = True
+            type_targets = []
     add_commands(
         type_checker.upper(),
         tc,
@@ -295,7 +341,20 @@ def run_gates(
         bounded=not ci and type_checker != "pyright",
     )
 
-    command_results = [(label, _run_command(command, root)) for label, command in commands]
+    command_results: list[tuple[str, subprocess.CompletedProcess[str]]] = []
+    for label, command in commands:
+        if label == "PYRIGHT" and use_selection_config:
+            try:
+                with _pyright_selection_config(files, root) as config_path:
+                    command_results.append(
+                        (label, _run_command([*command, "--project", str(config_path)], root))
+                    )
+            except (OSError, ValueError, tomllib.TOMLDecodeError) as exc:
+                command_results.append(
+                    (label, subprocess.CompletedProcess(command, 2, "", str(exc)))
+                )
+        else:
+            command_results.append((label, _run_command(command, root)))
     guard_errors = _custom_guard_errors(files, root)
     failures = [(label, result) for label, result in command_results if result.returncode != 0]
     if not failures and not guard_errors:
