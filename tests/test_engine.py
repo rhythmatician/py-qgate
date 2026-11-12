@@ -6,7 +6,7 @@ import shutil
 import subprocess
 import sys
 import time
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from pathlib import Path
 
 import pytest
@@ -387,10 +387,31 @@ def test_large_partial_target_set_runs_one_pyright_with_exact_selection(
     assert not Path(pyright_commands[0][-1]).exists()
 
 
+@pytest.fixture
+def pyright_project_commands(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[list[str]]]:
+    commands: list[list[str]] = []
+
+    def force_project(_files: Sequence[Path], _root: Path) -> None:
+        return None
+
+    def record_command(
+        command: list[str], root: Path, *, timeout_seconds: float
+    ) -> subprocess.CompletedProcess[str]:
+        if Path(command[0]).stem == "pyright":
+            commands.append(command)
+        return _run_command(command, root, timeout_seconds=timeout_seconds)
+
+    monkeypatch.setattr("qgate.engine._coherent_pyright_targets", force_project)
+    monkeypatch.setattr("qgate.engine._run_command", record_command)
+    yield commands
+    assert commands
+    assert all("--project" in command for command in commands)
+
+
+@pytest.mark.usefixtures("pyright_project_commands")
 def test_long_partial_selection_real_pyright_preserves_config_and_spaces(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    monkeypatch.setattr("qgate.engine._WINDOWS_SAFE_COMMAND_LENGTH", 100)
     (tmp_path / "pyproject.toml").write_text(
         "[tool.pyright]\nreportAssignmentType = false\n", encoding="utf-8"
     )
@@ -411,10 +432,10 @@ def test_long_partial_selection_real_pyright_preserves_config_and_spaces(
     assert not list(tmp_path.glob(".qgate-pyright-*.json"))
 
 
+@pytest.mark.usefixtures("pyright_project_commands")
 def test_long_selection_honors_json_precedence_and_execution_environment(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    monkeypatch.setattr("qgate.engine._WINDOWS_SAFE_COMMAND_LENGTH", 100)
     (tmp_path / "pyproject.toml").write_text(
         "[tool.pyright]\nreportAssignmentType = false\n", encoding="utf-8"
     )
@@ -441,11 +462,8 @@ def test_long_selection_honors_json_precedence_and_execution_environment(
 
 
 def test_long_selection_nested_config_matches_explicit_pyright(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], pyright_project_commands: list[list[str]]
 ) -> None:
-    from qgate.engine import _run_command
-
-    monkeypatch.setattr("qgate.engine._WINDOWS_SAFE_COMMAND_LENGTH", 100)
     settings = tmp_path / "settings"
     settings.mkdir()
     lib = tmp_path / "lib"
@@ -463,15 +481,6 @@ def test_long_selection_nested_config_matches_explicit_pyright(
     pyright = shutil.which("pyright")
     assert pyright is not None
     baseline = _run_command([pyright, str(source)], tmp_path)
-    calls: list[list[str]] = []
-
-    def record_command(
-        command: list[str], root: Path, *, timeout_seconds: float
-    ) -> subprocess.CompletedProcess[str]:
-        calls.append(command)
-        return _run_command(command, root, timeout_seconds=timeout_seconds)
-
-    monkeypatch.setattr("qgate.engine._run_command", record_command)
     assert baseline.returncode == 1
     assert "reportAssignmentType" in baseline.stdout
     assert "reportMissingImports" not in baseline.stdout
@@ -480,14 +489,14 @@ def test_long_selection_nested_config_matches_explicit_pyright(
     assert "reportAssignmentType" in errors
     assert "reportMissingImports" not in errors
     assert "unselected.py" not in errors
-    assert len([command for command in calls if "pyright" in command[0]]) == 1
+    assert len(pyright_project_commands) == 1
     assert not list(tmp_path.glob(".qgate-pyright-*.json"))
 
 
+@pytest.mark.usefixtures("pyright_project_commands")
 def test_long_selection_without_project_config_handles_literal_brackets(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    monkeypatch.setattr("qgate.engine._WINDOWS_SAFE_COMMAND_LENGTH", 100)
     source = tmp_path / "selected[1].py"
     source.write_text("value: int = None\n", encoding="utf-8")
     (tmp_path / "selected1.py").write_text("value: int = None\n", encoding="utf-8")
@@ -498,12 +507,10 @@ def test_long_selection_without_project_config_handles_literal_brackets(
     assert not list(tmp_path.glob(".qgate-pyright-*.json"))
 
 
+@pytest.mark.usefixtures("pyright_project_commands")
 def test_long_selection_preserves_project_excludes(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    from qgate.engine import _run_command
-
-    monkeypatch.setattr("qgate.engine._WINDOWS_SAFE_COMMAND_LENGTH", 100)
     (tmp_path / "pyrightconfig.json").write_text('{"exclude": ["selected.py"]}', encoding="utf-8")
     source = tmp_path / "selected.py"
     source.write_text("value: int = None\n", encoding="utf-8")
@@ -517,10 +524,10 @@ def test_long_selection_preserves_project_excludes(
     assert not list(tmp_path.glob(".qgate-pyright-*.json"))
 
 
+@pytest.mark.usefixtures("pyright_project_commands")
 def test_long_selection_without_project_config_runs_pyright(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    monkeypatch.setattr("qgate.engine._WINDOWS_SAFE_COMMAND_LENGTH", 100)
     source = tmp_path / "selected.py"
     source.write_text("value: int = None\n", encoding="utf-8")
     (tmp_path / "unselected.py").write_text("value: int = None\n", encoding="utf-8")
@@ -546,12 +553,10 @@ def test_selection_configs_are_unique_and_clean_up_after_exception(tmp_path: Pat
     assert not list(tmp_path.glob(".qgate-pyright-*.json"))
 
 
+@pytest.mark.usefixtures("pyright_project_commands")
 def test_ancestor_project_discovery_matches_explicit_pyright(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    from qgate.engine import _run_command
-
-    monkeypatch.setattr("qgate.engine._WINDOWS_SAFE_COMMAND_LENGTH", 100)
     (tmp_path / "pyrightconfig.json").write_text(
         '{"reportAssignmentType": false}', encoding="utf-8"
     )
